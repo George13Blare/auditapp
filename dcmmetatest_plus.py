@@ -226,6 +226,18 @@ def is_label_json(path: Union[str, Path]) -> bool:
     return False
 
 
+def extract_modality(ds) -> str:
+    """Возвращает значение Modality как верхний регистр либо 'UNKNOWN'."""
+    elem = ds.get((0x0008, 0x0060))
+    if elem is None:
+        return "UNKNOWN"
+    value = getattr(elem, "value", elem)
+    if value is None:
+        return "UNKNOWN"
+    value_str = str(value).strip().upper()
+    return value_str or "UNKNOWN"
+
+
 @dataclass
 class StudyResult:
     study_key: str                # путь директории или UID исследования
@@ -402,70 +414,38 @@ def _process_dir_study(study_path: str, config: WorkerConfig, debug: bool = Fals
             if should_exclude(f, config.exclude_patterns):
                 continue
 
-            if is_dicom_file(f):
-                ds = read_dicom_header(str(f))
-                if ds is None:
-                    continue
-                file_count += 1
-                modality = str(ds.get((0x0008, 0x0060), "UNKNOWN")).strip().upper()
-                if modality and modality != "UNKNOWN":
-                    if config.modality_filter is None or modality in config.modality_filter:
-                        modalities.append(modality)
-                        detect_label_from_dataset(ds, label_sources)
-                try:
-                    if (0x0010, 0x0010) in ds:
-                        pn = str(ds[0x0010, 0x0010].value or "").strip()
-                        if pn:
-                            is_anon, _, _ = check_dicom_anonymization(str(f))
-                            if not is_anon:
-                                non_anon_patients.add(pn)
-                    if (0x0010, 0x0020) in ds:
-                        pid = str(ds[0x0010, 0x0020].value or "").strip()
-                        if pid:
-                            patient_ids.add(pid)
-                except Exception as err:
-                    if config.strict:
-                        raise RuntimeError(f"Ошибка при проверке анонимности {f}: {err}") from err
-                    errors.append(f"{f}: {err!s}")
+    for f in dicom_files:
+        try:
+            ds = pydicom.dcmread(str(f), stop_before_pixels=True, force=True)
+            modality = extract_modality(ds)
+            if modality and modality != "UNKNOWN":
+                modalities.append(modality)
+                if modality in {"RTSTRUCT", "SEG", "RTSEGANN"}:
+                    has_label = True
 
-                series_uid = str(ds.get((0x0020, 0x000E), "")).strip()
-                series_desc = str(ds.get((0x0008, 0x103E), "")).strip()
-                if series_uid:
-                    info = series_raw.setdefault(
-                        series_uid,
-                        {"description": series_desc, "modalities": set(), "files": 0},
-                    )
-                    info["files"] = int(info.get("files", 0)) + 1
-                    if modality:
-                        info.setdefault("modalities", set()).add(modality)
-                    if series_desc:
-                        lowered = series_desc.lower()
-                        for keyword in config.detect_series_keywords:
-                            if keyword in lowered:
-                                label_sources.add(f"series_description:{keyword}")
-                                break
-            else:
-                lower_path = str(f).lower()
-                lower_name = f.name.lower()
-                for pattern in config.detect_label_file_patterns:
-                    pattern_lower = pattern.lower()
-                    if fnmatch.fnmatch(lower_name, pattern_lower) or fnmatch.fnmatch(lower_path, pattern_lower):
-                        label_sources.add(f"file_pattern:{pattern}")
-                        break
-                if config.detect_label_json and f.suffix.lower() == ".json":
-                    try:
-                        if is_label_json(f):
-                            label_sources.add("label_json")
-                    except Exception as err:
-                        if config.strict:
-                            raise RuntimeError(f"Ошибка анализа JSON {f}: {err}") from err
-                        errors.append(f"{f}: {err!s}")
-    except Exception as exc:
-        if config.strict:
-            raise
-        errors.append(f"{study_path}: {exc!s}")
+            # Проверка анонимности — строго через исходную функцию, "как есть"
+            if True:
+                is_anon, _, _ = check_dicom_anonymization(str(f))
+                if not is_anon and (0x0010, 0x0010) in ds:
+                    pn = str(ds[0x0010, 0x0010].value or "").strip()
+                    if pn:
+                        non_anon_patients.add(pn)
+        except Exception as e:
+            errors.append(f"{f}: {e!s}")
 
-    has_label = bool(label_sources)
+    # Дополнительные признаки разметки (NNRD/JSON)
+    label_files = list(Path(study_path).rglob("*.seg.nrrd"))
+    if label_files:
+        has_label = True
+    # Фильтр JSON по имени/структуре
+    for jf in Path(study_path).rglob("*.json"):
+        try:
+            if is_label_json(jf):
+                has_label = True
+                break
+        except Exception:
+            # игнорируем ошибки парсинга
+            pass
 
     if debug:
         print(
@@ -513,11 +493,8 @@ def _process_uid_study(uid: str, files: List[str], config: WorkerConfig, debug: 
 
     for f in files:
         try:
-            ds = read_dicom_header(str(f))
-            if ds is None:
-                continue
-            file_count += 1
-            modality = str(ds.get((0x0008, 0x0060), "UNKNOWN")).strip().upper()
+            ds = pydicom.dcmread(str(f), stop_before_pixels=True, force=True)
+            modality = extract_modality(ds)
             if modality and modality != "UNKNOWN":
                 if config.modality_filter is None or modality in config.modality_filter:
                     modalities.append(modality)
