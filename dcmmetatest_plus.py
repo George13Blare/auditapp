@@ -146,6 +146,18 @@ def is_label_json(path: Union[str, Path]) -> bool:
     return False
 
 
+def extract_modality(ds) -> str:
+    """Возвращает значение Modality как верхний регистр либо 'UNKNOWN'."""
+    elem = ds.get((0x0008, 0x0060))
+    if elem is None:
+        return "UNKNOWN"
+    value = getattr(elem, "value", elem)
+    if value is None:
+        return "UNKNOWN"
+    value_str = str(value).strip().upper()
+    return value_str or "UNKNOWN"
+
+
 @dataclass
 class StudyResult:
     study_key: str                # путь директории или UID исследования
@@ -268,7 +280,7 @@ def _process_dir_study(study_path: str, debug: bool = False) -> StudyResult:
     for f in dicom_files:
         try:
             ds = pydicom.dcmread(str(f), stop_before_pixels=True, force=True)
-            modality = str(ds.get((0x0008, 0x0060), "UNKNOWN")).strip().upper()
+            modality = extract_modality(ds)
             if modality and modality != "UNKNOWN":
                 modalities.append(modality)
                 if modality in {"RTSTRUCT", "SEG", "RTSEGANN"}:
@@ -321,7 +333,7 @@ def _process_uid_study(uid: str, files: List[str], debug: bool = False) -> Study
     for f in files:
         try:
             ds = pydicom.dcmread(str(f), stop_before_pixels=True, force=True)
-            modality = str(ds.get((0x0008, 0x0060), "UNKNOWN")).strip().upper()
+            modality = extract_modality(ds)
             if modality and modality != "UNKNOWN":
                 modalities.append(modality)
                 if modality in {"RTSTRUCT", "SEG", "RTSEGANN"}:
