@@ -14,6 +14,14 @@ dcmmetatest_plus.py — расширенная версия анализатор
 - Контроль обхода: глубина, следование симлинкам, опциональный вывод пустых папок.
 - Улучшенные сообщения об ошибках и диагностика.
 - Форматы отчёта сохранены (TXT/CSV/JSON), имена флагов остаются совместимыми.
+- Кеширование заголовков DICOM для снижения количества повторных чтений.
+- Расширенная детекция разметки: анализ SOPClassUID, SeriesDescription, SegmentSequence,
+  поддержка NIfTI/NRRD/MHA и масок по шаблонам файлов.
+- Более информативные отчёты: статистика по сериям, среднее количество файлов, сводка по пациентам,
+  подсчёт источников определения разметки.
+- Новый CLI-функционал: фильтры по modality, выбор только размеченных/неанонимных исследований,
+  исключение директорий по шаблонам, управление прогресс-баром, батчинг заданий и конфигурация через YAML/JSON.
+- Настройка логирования (уровень, файл), строгий режим остановки при ошибках и расширяемые шаблоны обработки.
 
 ВАЖНО: Логику анонимизации мы НЕ меняли — она берётся из исходного файла dcmmetatest.py,
 и вызывается как есть (через import исходной функции check_dicom_anonymization).
@@ -26,15 +34,44 @@ import sys
 import json
 import csv
 import argparse
+import logging
+import fnmatch
 from dataclasses import dataclass, field
 from typing import Dict, List, Tuple, Iterable, Optional, Set, Union
 from pathlib import Path
 from collections import defaultdict, Counter
 from concurrent.futures import ProcessPoolExecutor, ThreadPoolExecutor, as_completed
+from functools import lru_cache
+
+try:
+    import yaml  # type: ignore
+except Exception:  # pragma: no cover - yaml is optional
+    yaml = None
 
 import pydicom
 from pydicom.errors import InvalidDicomError
 from tqdm import tqdm
+
+logger = logging.getLogger(__name__)
+
+LABEL_SOP_CLASS_UIDS: Set[str] = {
+    "1.2.840.10008.5.1.4.1.1.481.3",  # RT Structure Set Storage
+    "1.2.840.10008.5.1.4.1.1.66.4",   # Segmentation Storage
+    "1.2.840.10008.5.1.4.1.1.130",    # Surface Segmentation Storage
+    "1.2.840.10008.5.1.4.1.1.481.5",  # RT Dose Storage
+    "1.2.840.10008.5.1.4.1.1.481.2",  # RT Plan Storage
+}
+
+LABEL_SERIES_KEYWORDS: Set[str] = {
+    "seg", "mask", "label", "roi", "annotation", "dose", "structure", "contour", "markup"
+}
+
+LABEL_FILE_PATTERNS: Tuple[str, ...] = (
+    "*.nii", "*.nii.gz", "*.nrrd", "*.seg.nrrd", "*.mha", "*.mhd",
+    "*mask*.png", "*mask*.jpg", "*mask*.tif", "*mask*.tiff",
+    "*label*.png", "*label*.jpg", "*label*.tif", "*label*.tiff",
+    "*.npz", "*.npy", "*.h5"
+)
 
 # --- ВСТАВЛЕНА ИСХОДНАЯ ФУНКЦИЯ АНОНИМИЗАЦИИ (без изменений) ---
 def check_dicom_anonymization(dicom_file):
@@ -72,6 +109,49 @@ def check_dicom_anonymization(dicom_file):
 
 # ---------------- Вспомогательные функции ----------------
 
+def configure_logging(level: str = "INFO", log_file: Optional[str] = None) -> None:
+    level = level.upper()
+    numeric_level = getattr(logging, level, logging.INFO)
+    handlers: List[logging.Handler] = [logging.StreamHandler(sys.stderr)]
+    if log_file:
+        handlers.append(logging.FileHandler(log_file, mode="w", encoding="utf-8"))
+    logging.basicConfig(
+        level=numeric_level,
+        format="%(asctime)s [%(levelname)s] %(name)s: %(message)s",
+        handlers=handlers,
+    )
+
+
+@lru_cache(maxsize=2048)
+def read_dicom_header(path: str) -> Optional[pydicom.dataset.Dataset]:
+    try:
+        return pydicom.dcmread(path, stop_before_pixels=True, force=True)
+    except Exception as exc:
+        logger.debug("Не удалось прочитать DICOM %s: %s", path, exc)
+        return None
+
+
+def should_exclude(path: Path, patterns: Tuple[str, ...]) -> bool:
+    if not patterns:
+        return False
+    path_str = str(path)
+    for pattern in patterns:
+        if fnmatch.fnmatch(path_str, pattern):
+            return True
+    return False
+
+
+def batched(iterable: Iterable, batch_size: int) -> Iterable[List]:
+    batch: List = []
+    for item in iterable:
+        batch.append(item)
+        if len(batch) >= batch_size:
+            yield batch
+            batch = []
+    if batch:
+        yield batch
+
+
 def is_dicom_file(path: Union[str, Path]) -> bool:
     """
     Надёжная проверка, является ли файл DICOM.
@@ -103,8 +183,8 @@ def is_dicom_file(path: Union[str, Path]) -> bool:
 
         # Вариант 3: грубая попытка распарсить без пикселей
         try:
-            pydicom.dcmread(path, stop_before_pixels=True, force=True)
-            return True
+            ds = read_dicom_header(path)
+            return ds is not None
         except (InvalidDicomError, Exception):
             return False
     except Exception:
@@ -154,13 +234,50 @@ class StudyResult:
     modalities: List[str]
     errors: List[str] = field(default_factory=list)
     study_path_rep: Optional[str] = None  # человекочитаемое представление (путь к первой папке и т.п.)
+    label_sources: Set[str] = field(default_factory=set)
+    series: Dict[str, Dict[str, Union[str, int, List[str]]]] = field(default_factory=dict)
+    file_count: int = 0
+    patient_ids: List[str] = field(default_factory=list)
 
+
+@dataclass
+class WorkerConfig:
+    modality_filter: Optional[Set[str]] = None
+    strict: bool = False
+    exclude_patterns: Tuple[str, ...] = ()
+    detect_series_keywords: Set[str] = field(default_factory=lambda: set(LABEL_SERIES_KEYWORDS))
+    detect_label_file_patterns: Tuple[str, ...] = LABEL_FILE_PATTERNS
+    detect_label_json: bool = True
+
+
+def detect_label_from_dataset(ds: pydicom.dataset.Dataset, sources: Set[str]) -> None:
+    modality = str(ds.get((0x0008, 0x0060), "")).strip().upper()
+    if modality in {"RTSTRUCT", "SEG", "RTSEGANN"}:
+        sources.add(f"dicom_modality:{modality}")
+
+    sop = str(ds.get((0x0008, 0x0016), "")).strip()
+    if sop in LABEL_SOP_CLASS_UIDS:
+        sources.add(f"sop_class:{sop}")
+
+    if hasattr(ds, "SegmentSequence"):
+        sources.add("segment_sequence")
+
+    series_desc = str(ds.get((0x0008, 0x103E), "")).lower()
+    if series_desc:
+        for keyword in LABEL_SERIES_KEYWORDS:
+            if keyword in series_desc:
+                sources.add(f"series_description:{keyword}")
+                break
+
+    if str(ds.get("ContentLabel", "")).lower() in {"segmentation", "mask", "roi"}:
+        sources.add("content_label")
 
 # ---------------- Обход и группировка ----------------
 
 def iter_all_files(root: Union[str, Path],
                    follow_symlinks: bool = False,
-                   max_depth: Optional[int] = None) -> Iterable[Path]:
+                   max_depth: Optional[int] = None,
+                   exclude_patterns: Tuple[str, ...] = ()) -> Iterable[Path]:
     root = Path(root)
     root_parts = len(root.parts)
     for dirpath, dirnames, filenames in os.walk(root, followlinks=follow_symlinks):
@@ -173,9 +290,13 @@ def iter_all_files(root: Union[str, Path],
         # Фильтр симлинков на директории
         if not follow_symlinks:
             dirnames[:] = [dn for dn in dirnames if not Path(dirpath, dn).is_symlink()]
+        if exclude_patterns:
+            dirnames[:] = [dn for dn in dirnames if not should_exclude(Path(dirpath) / dn, exclude_patterns)]
         for fn in filenames:
             p = Path(dirpath) / fn
             if not follow_symlinks and p.is_symlink():
+                continue
+            if should_exclude(p, exclude_patterns):
                 continue
             yield p
 
@@ -183,7 +304,8 @@ def iter_all_files(root: Union[str, Path],
 def find_dicom_studies_by_dir(folder_path: Union[str, Path],
                               list_empty: bool = False,
                               follow_symlinks: bool = False,
-                              max_depth: Optional[int] = None) -> Tuple[List[str], List[str]]:
+                              max_depth: Optional[int] = None,
+                              exclude_patterns: Tuple[str, ...] = ()) -> Tuple[List[str], List[str]]:
     """Старое правило: «директория с ≥1 DICOM — это исследование»."""
     dicom_studies: List[str] = []
     empty_folders: List[str] = []
@@ -199,6 +321,8 @@ def find_dicom_studies_by_dir(folder_path: Union[str, Path],
         # Симлинки
         if not follow_symlinks:
             dirnames[:] = [dn for dn in dirnames if not (d / dn).is_symlink()]
+        if exclude_patterns:
+            dirnames[:] = [dn for dn in dirnames if not should_exclude(d / dn, exclude_patterns)]
 
         if not dirnames and not filenames:
             if list_empty:
@@ -209,6 +333,8 @@ def find_dicom_studies_by_dir(folder_path: Union[str, Path],
         for fn in filenames:
             p = d / fn
             if not follow_symlinks and p.is_symlink():
+                continue
+            if should_exclude(p, exclude_patterns):
                 continue
             try:
                 if is_dicom_file(p):
@@ -224,21 +350,26 @@ def find_dicom_studies_by_dir(folder_path: Union[str, Path],
 
 def find_dicom_studies_by_uid(folder_path: Union[str, Path],
                               follow_symlinks: bool = False,
-                              max_depth: Optional[int] = None) -> Dict[str, List[str]]:
+                              max_depth: Optional[int] = None,
+                              exclude_patterns: Tuple[str, ...] = ()) -> Dict[str, List[str]]:
     """
     Новая опция: группировать файлы по StudyInstanceUID.
     Возвращает dict: UID -> список файлов DICOM.
     """
     studies: Dict[str, List[str]] = defaultdict(list)
-    for p in iter_all_files(folder_path, follow_symlinks=follow_symlinks, max_depth=max_depth):
+    for p in iter_all_files(
+        folder_path,
+        follow_symlinks=follow_symlinks,
+        max_depth=max_depth,
+        exclude_patterns=exclude_patterns,
+    ):
         if not p.is_file():
             continue
         try:
             if not is_dicom_file(p):
                 continue
-            try:
-                ds = pydicom.dcmread(str(p), stop_before_pixels=True, force=True)
-            except Exception:
+            ds = read_dicom_header(str(p))
+            if ds is None:
                 continue
             uid = None
             # Тег (0020,000D) — StudyInstanceUID
@@ -253,53 +384,107 @@ def find_dicom_studies_by_uid(folder_path: Union[str, Path],
 
 # ---------------- Обработка одного исследования ----------------
 
-def _process_dir_study(study_path: str, debug: bool = False) -> StudyResult:
+
+
+def _process_dir_study(study_path: str, config: WorkerConfig, debug: bool = False) -> StudyResult:
     non_anon_patients: Set[str] = set()
+    patient_ids: Set[str] = set()
     errors: List[str] = []
     modalities: List[str] = []
-    has_label = False
+    label_sources: Set[str] = set()
+    series_raw: Dict[str, Dict[str, Union[str, int, Set[str]]]] = {}
+    file_count = 0
 
-    all_files = list(Path(study_path).rglob("*"))
-    dicom_files = [f for f in all_files if f.is_file() and is_dicom_file(f)]
+    try:
+        for f in Path(study_path).rglob("*"):
+            if not f.is_file():
+                continue
+            if should_exclude(f, config.exclude_patterns):
+                continue
+
+            if is_dicom_file(f):
+                ds = read_dicom_header(str(f))
+                if ds is None:
+                    continue
+                file_count += 1
+                modality = str(ds.get((0x0008, 0x0060), "UNKNOWN")).strip().upper()
+                if modality and modality != "UNKNOWN":
+                    if config.modality_filter is None or modality in config.modality_filter:
+                        modalities.append(modality)
+                        detect_label_from_dataset(ds, label_sources)
+                try:
+                    if (0x0010, 0x0010) in ds:
+                        pn = str(ds[0x0010, 0x0010].value or "").strip()
+                        if pn:
+                            is_anon, _, _ = check_dicom_anonymization(str(f))
+                            if not is_anon:
+                                non_anon_patients.add(pn)
+                    if (0x0010, 0x0020) in ds:
+                        pid = str(ds[0x0010, 0x0020].value or "").strip()
+                        if pid:
+                            patient_ids.add(pid)
+                except Exception as err:
+                    if config.strict:
+                        raise RuntimeError(f"Ошибка при проверке анонимности {f}: {err}") from err
+                    errors.append(f"{f}: {err!s}")
+
+                series_uid = str(ds.get((0x0020, 0x000E), "")).strip()
+                series_desc = str(ds.get((0x0008, 0x103E), "")).strip()
+                if series_uid:
+                    info = series_raw.setdefault(
+                        series_uid,
+                        {"description": series_desc, "modalities": set(), "files": 0},
+                    )
+                    info["files"] = int(info.get("files", 0)) + 1
+                    if modality:
+                        info.setdefault("modalities", set()).add(modality)
+                    if series_desc:
+                        lowered = series_desc.lower()
+                        for keyword in config.detect_series_keywords:
+                            if keyword in lowered:
+                                label_sources.add(f"series_description:{keyword}")
+                                break
+            else:
+                lower_path = str(f).lower()
+                lower_name = f.name.lower()
+                for pattern in config.detect_label_file_patterns:
+                    pattern_lower = pattern.lower()
+                    if fnmatch.fnmatch(lower_name, pattern_lower) or fnmatch.fnmatch(lower_path, pattern_lower):
+                        label_sources.add(f"file_pattern:{pattern}")
+                        break
+                if config.detect_label_json and f.suffix.lower() == ".json":
+                    try:
+                        if is_label_json(f):
+                            label_sources.add("label_json")
+                    except Exception as err:
+                        if config.strict:
+                            raise RuntimeError(f"Ошибка анализа JSON {f}: {err}") from err
+                        errors.append(f"{f}: {err!s}")
+    except Exception as exc:
+        if config.strict:
+            raise
+        errors.append(f"{study_path}: {exc!s}")
+
+    has_label = bool(label_sources)
 
     if debug:
-        print(f"[DIR] Обработка: {study_path}, DICOM файлов: {len(dicom_files)}", flush=True)
+        print(
+            f"[DIR] {study_path} -> has_label={has_label}, modalities={sorted(set(modalities))}",
+            flush=True,
+        )
 
-    for f in dicom_files:
-        try:
-            ds = pydicom.dcmread(str(f), stop_before_pixels=True, force=True)
-            modality = str(ds.get((0x0008, 0x0060), "UNKNOWN")).strip().upper()
-            if modality and modality != "UNKNOWN":
-                modalities.append(modality)
-                if modality in {"RTSTRUCT", "SEG", "RTSEGANN"}:
-                    has_label = True
-
-            # Проверка анонимности — строго через исходную функцию, "как есть"
-            if True:
-                is_anon, _, _ = check_dicom_anonymization(str(f))
-                if not is_anon and (0x0010, 0x0010) in ds:
-                    pn = str(ds[0x0010, 0x0010].value or "").strip()
-                    if pn:
-                        non_anon_patients.add(pn)
-        except Exception as e:
-            errors.append(f"{f}: {e!s}")
-
-    # Дополнительные признаки разметки (NNRD/JSON)
-    label_files = list(Path(study_path).rglob("*.seg.nrrd"))
-    if label_files:
-        has_label = True
-    # Фильтр JSON по имени/структуре
-    for jf in Path(study_path).rglob("*.json"):
-        try:
-            if is_label_json(jf):
-                has_label = True
-                break
-        except Exception:
-            # игнорируем ошибки парсинга
-            pass
-
-    if debug:
-        print(f"[DIR] {study_path} -> has_label={has_label}, modalities={sorted(set(modalities))}", flush=True)
+    series_serializable: Dict[str, Dict[str, Union[str, int, List[str]]]] = {}
+    for uid, info in series_raw.items():
+        modalities_set = info.get("modalities", set())
+        if isinstance(modalities_set, set):
+            modalities_list = sorted(modalities_set)
+        else:
+            modalities_list = list(modalities_set)
+        series_serializable[uid] = {
+            "description": info.get("description", ""),
+            "modalities": modalities_list,
+            "files": int(info.get("files", 0)),
+        }
 
     return StudyResult(
         study_key=study_path,
@@ -308,54 +493,112 @@ def _process_dir_study(study_path: str, debug: bool = False) -> StudyResult:
         modalities=modalities,
         errors=errors,
         study_path_rep=study_path,
+        label_sources=label_sources,
+        series=series_serializable,
+        file_count=file_count,
+        patient_ids=sorted(patient_ids),
     )
 
 
-def _process_uid_study(uid: str, files: List[str], debug: bool = False) -> StudyResult:
+
+def _process_uid_study(uid: str, files: List[str], config: WorkerConfig, debug: bool = False) -> StudyResult:
     non_anon_patients: Set[str] = set()
+    patient_ids: Set[str] = set()
     errors: List[str] = []
     modalities: List[str] = []
-    has_label = False
+    label_sources: Set[str] = set()
+    series_raw: Dict[str, Dict[str, Union[str, int, Set[str]]]] = {}
+    file_count = 0
     rep_path = str(Path(files[0]).parent) if files else None
 
     for f in files:
         try:
-            ds = pydicom.dcmread(str(f), stop_before_pixels=True, force=True)
+            ds = read_dicom_header(str(f))
+            if ds is None:
+                continue
+            file_count += 1
             modality = str(ds.get((0x0008, 0x0060), "UNKNOWN")).strip().upper()
             if modality and modality != "UNKNOWN":
-                modalities.append(modality)
-                if modality in {"RTSTRUCT", "SEG", "RTSEGANN"}:
-                    has_label = True
+                if config.modality_filter is None or modality in config.modality_filter:
+                    modalities.append(modality)
+                    detect_label_from_dataset(ds, label_sources)
 
-            if True:
-                is_anon, _, _ = check_dicom_anonymization(str(f))
-                if not is_anon and (0x0010, 0x0010) in ds:
-                    pn = str(ds[0x0010, 0x0010].value or "").strip()
-                    if pn:
-                        non_anon_patients.add(pn)
+            is_anon, _, _ = check_dicom_anonymization(str(f))
+            if not is_anon and (0x0010, 0x0010) in ds:
+                pn = str(ds[0x0010, 0x0010].value or "").strip()
+                if pn:
+                    non_anon_patients.add(pn)
+            if (0x0010, 0x0020) in ds:
+                pid = str(ds[0x0010, 0x0020].value or "").strip()
+                if pid:
+                    patient_ids.add(pid)
 
-        except Exception as e:
-            errors.append(f"{f}: {e!s}")
+            series_uid = str(ds.get((0x0020, 0x000E), "")).strip()
+            series_desc = str(ds.get((0x0008, 0x103E), "")).strip()
+            if series_uid:
+                info = series_raw.setdefault(
+                    series_uid,
+                    {"description": series_desc, "modalities": set(), "files": 0},
+                )
+                info["files"] = int(info.get("files", 0)) + 1
+                if modality:
+                    info.setdefault("modalities", set()).add(modality)
+                if series_desc:
+                    lowered = series_desc.lower()
+                    for keyword in config.detect_series_keywords:
+                        if keyword in lowered:
+                            label_sources.add(f"series_description:{keyword}")
+                            break
 
-    # Дополнительные признаки разметки в директориях, где лежат файлы исследования
+        except Exception as err:
+            if config.strict:
+                raise RuntimeError(f"Ошибка обработки {f}: {err}") from err
+            errors.append(f"{f}: {err!s}")
+
     for base in {str(Path(f).parent) for f in files}:
-        # NRRD
-        if list(Path(base).rglob("*.seg.nrrd")):
-            has_label = True
+        base_path = Path(base)
+        if should_exclude(base_path, config.exclude_patterns):
+            continue
+        for pattern in config.detect_label_file_patterns:
+            matches = list(base_path.rglob(pattern))
+            if matches:
+                label_sources.add(f"file_pattern:{pattern}")
+                break
+        if config.detect_label_json:
+            for jf in base_path.rglob("*.json"):
+                if should_exclude(jf, config.exclude_patterns):
+                    continue
+                try:
+                    if is_label_json(jf):
+                        label_sources.add("label_json")
+                        break
+                except Exception as err:
+                    if config.strict:
+                        raise RuntimeError(f"Ошибка анализа JSON {jf}: {err}") from err
+                    errors.append(f"{jf}: {err!s}")
+        if label_sources:
             break
-        # JSON
-        for jf in Path(base).rglob("*.json"):
-            try:
-                if is_label_json(jf):
-                    has_label = True
-                    break
-            except Exception:
-                pass
-        if has_label:
-            break
+
+    has_label = bool(label_sources)
 
     if debug:
-        print(f"[UID] {uid} ({rep_path}) -> has_label={has_label}, modalities={sorted(set(modalities))}", flush=True)
+        print(
+            f"[UID] {uid} ({rep_path}) -> has_label={has_label}, modalities={sorted(set(modalities))}",
+            flush=True,
+        )
+
+    series_serializable: Dict[str, Dict[str, Union[str, int, List[str]]]] = {}
+    for series_uid, info in series_raw.items():
+        modalities_set = info.get("modalities", set())
+        if isinstance(modalities_set, set):
+            modalities_list = sorted(modalities_set)
+        else:
+            modalities_list = list(modalities_set)
+        series_serializable[series_uid] = {
+            "description": info.get("description", ""),
+            "modalities": modalities_list,
+            "files": int(info.get("files", 0)),
+        }
 
     return StudyResult(
         study_key=uid,
@@ -364,10 +607,29 @@ def _process_uid_study(uid: str, files: List[str], debug: bool = False) -> Study
         modalities=modalities,
         errors=errors,
         study_path_rep=rep_path,
+        label_sources=label_sources,
+        series=series_serializable,
+        file_count=file_count,
+        patient_ids=sorted(patient_ids),
     )
 
 
+def _process_dir_batch(study_paths: List[str], config: WorkerConfig, debug: bool = False) -> List[StudyResult]:
+    batch_results: List[StudyResult] = []
+    for study_path in study_paths:
+        batch_results.append(_process_dir_study(study_path, config=config, debug=debug))
+    return batch_results
+
+
+def _process_uid_batch(items: List[Tuple[str, List[str]]], config: WorkerConfig, debug: bool = False) -> List[StudyResult]:
+    batch_results: List[StudyResult] = []
+    for uid, files in items:
+        batch_results.append(_process_uid_study(uid, files, config=config, debug=debug))
+    return batch_results
+
 # ---------------- Основной конвейер ----------------
+
+
 
 def analyze_dataset(folder_path: Union[str, Path],
                     debug: bool = False,
@@ -376,10 +638,15 @@ def analyze_dataset(folder_path: Union[str, Path],
                     workers: Optional[int] = None,
                     follow_symlinks: bool = False,
                     max_depth: Optional[int] = None,
-                    list_empty: bool = False) -> Dict:
-    """
-    Возвращает словарь с агрегатами по результатам.
-    """
+                    list_empty: bool = False,
+                    modality_filter: Optional[Iterable[str]] = None,
+                    only_labeled: bool = False,
+                    only_nonanon: bool = False,
+                    exclude_patterns: Optional[Iterable[str]] = None,
+                    strict: bool = False,
+                    no_progress: bool = False,
+                    batch_size: int = 1) -> Dict:
+    """Возвращает словарь с агрегатами по результатам."""
     folder_path = Path(folder_path)
 
     if group_by not in {"dir", "study"}:
@@ -388,28 +655,54 @@ def analyze_dataset(folder_path: Union[str, Path],
     if executor_kind not in {"process", "thread"}:
         raise ValueError("--executor должен быть 'process' или 'thread'")
 
+    exclude_patterns = tuple(exclude_patterns or ())
+    modality_filter_set: Optional[Set[str]] = None
+    if modality_filter:
+        modality_filter_set = {m.strip().upper() for m in modality_filter if m.strip()}
+        if not modality_filter_set:
+            modality_filter_set = None
+
+    config = WorkerConfig(
+        modality_filter=modality_filter_set,
+        strict=strict,
+        exclude_patterns=exclude_patterns,
+    )
+
     results = {
         "total_studies": 0,
+        "processed_studies": 0,
+        "filtered_out_studies": 0,
         "labeled_studies": 0,
-        "non_anonymous_studies": defaultdict(list),  # study_key -> [names]
+        "non_anonymous_studies": defaultdict(list),
         "modality_stats": Counter(),
         "empty_folders": [],
         "errors": [],
         "debug_info": [],
         "group_by": group_by,
+        "study_stats": {},
+        "patient_summary": defaultdict(list),
+        "study_file_counts": {},
+        "series_summary": {},
+        "label_source_stats": Counter(),
     }
 
-    # 1) Получаем список «исследований»
     uid_map: Dict[str, List[str]] = {}
     if group_by == "dir":
         studies, empty = find_dicom_studies_by_dir(
-            folder_path, list_empty=list_empty, follow_symlinks=follow_symlinks, max_depth=max_depth
+            folder_path,
+            list_empty=list_empty,
+            follow_symlinks=follow_symlinks,
+            max_depth=max_depth,
+            exclude_patterns=exclude_patterns,
         )
         study_items = studies
         results["empty_folders"] = empty
     else:
         uid_map = find_dicom_studies_by_uid(
-            folder_path, follow_symlinks=follow_symlinks, max_depth=max_depth
+            folder_path,
+            follow_symlinks=follow_symlinks,
+            max_depth=max_depth,
+            exclude_patterns=exclude_patterns,
         )
         study_items = list(uid_map.keys())
 
@@ -420,58 +713,173 @@ def analyze_dataset(folder_path: Union[str, Path],
             print("DICOM-исследований не найдено.")
         return results
 
-    # 2) Параллельная обработка
     Exec = ProcessPoolExecutor if executor_kind == "process" else ThreadPoolExecutor
     max_workers = workers or os.cpu_count() or 1
+    batch_size = max(1, int(batch_size or 1))
 
     futures = []
     with Exec(max_workers=max_workers) as pool:
         if group_by == "dir":
-            for sp in study_items:
-                futures.append(pool.submit(_process_dir_study, sp, debug))
+            if batch_size > 1:
+                for chunk in batched(study_items, batch_size):
+                    futures.append(pool.submit(_process_dir_batch, list(chunk), config, debug))
+            else:
+                for sp in study_items:
+                    futures.append(pool.submit(_process_dir_study, sp, config, debug))
         else:
-            for uid in study_items:
-                futures.append(pool.submit(_process_uid_study, uid, uid_map.get(uid, []), debug))
+            if batch_size > 1:
+                uid_items = [(uid, uid_map.get(uid, [])) for uid in study_items]
+                for chunk in batched(uid_items, batch_size):
+                    futures.append(pool.submit(_process_uid_batch, list(chunk), config, debug))
+            else:
+                for uid in study_items:
+                    futures.append(pool.submit(_process_uid_study, uid, uid_map.get(uid, []), config, debug))
 
-        for fut in tqdm(as_completed(futures), total=len(futures), desc="Анализ исследований"):
+        iterator = as_completed(futures)
+        if not no_progress:
+            iterator = tqdm(iterator, total=len(futures), desc="Анализ исследований")
+
+        for fut in iterator:
             try:
-                r: StudyResult = fut.result()
+                result = fut.result()
             except Exception as e:
+                logger.error("Ошибка обработки исследования: %s", e)
                 results["errors"].append(str(e))
+                if strict:
+                    raise
                 continue
 
-            if r.has_label:
-                results["labeled_studies"] += 1
-            if r.non_anon_patients:
-                results["non_anonymous_studies"][r.study_key] = r.non_anon_patients
-            results["modality_stats"].update(r.modalities)
-            results["errors"].extend(r.errors)
-            if debug:
-                results["debug_info"].append({
-                    "study_key": r.study_key,
+            batch_results = result if isinstance(result, list) else [result]
+            for r in batch_results:
+                include = True
+                if modality_filter_set is not None and not r.modalities:
+                    include = False
+                if only_labeled and not r.has_label:
+                    include = False
+                if only_nonanon and not r.non_anon_patients:
+                    include = False
+
+                if not include:
+                    results["filtered_out_studies"] += 1
+                    continue
+
+                results["processed_studies"] += 1
+                if r.has_label:
+                    results["labeled_studies"] += 1
+                if r.non_anon_patients:
+                    results["non_anonymous_studies"][r.study_key] = r.non_anon_patients
+                results["modality_stats"].update(r.modalities)
+                results["errors"].extend(r.errors)
+                results["study_file_counts"][r.study_key] = r.file_count
+                results["study_stats"][r.study_key] = {
+                    "modalities": sorted(set(r.modalities)),
                     "has_label": r.has_label,
-                    "modalities": r.modalities,
+                    "label_sources": sorted(r.label_sources),
+                    "non_anonymous_patients": r.non_anon_patients,
+                    "patient_ids": r.patient_ids,
+                    "file_count": r.file_count,
+                    "series": r.series,
                     "errors": r.errors,
-                    "study_path_rep": r.study_path_rep,
-                })
+                }
+                for pid in r.patient_ids:
+                    results["patient_summary"][pid].append(r.study_key)
+                for source in r.label_sources:
+                    results["label_source_stats"][source] += 1
+                for series_uid, info in r.series.items():
+                    entry = results["series_summary"].setdefault(
+                        series_uid,
+                        {
+                            "description": info.get("description", ""),
+                            "modalities": Counter(),
+                            "studies": set(),
+                            "files": 0,
+                        },
+                    )
+                    entry["files"] += int(info.get("files", 0))
+                    entry["studies"].add(r.study_key)
+                    for mod in info.get("modalities", []):
+                        entry["modalities"][mod] += 1
+                if debug:
+                    results["debug_info"].append({
+                        "study_key": r.study_key,
+                        "has_label": r.has_label,
+                        "modalities": r.modalities,
+                        "errors": r.errors,
+                        "study_path_rep": r.study_path_rep,
+                        "label_sources": sorted(r.label_sources),
+                    })
+
+    if results["study_file_counts"]:
+        total_files = sum(results["study_file_counts"].values())
+        results["average_files_per_study"] = total_files / max(results["processed_studies"], 1)
+    else:
+        results["average_files_per_study"] = 0.0
+
+    results["unique_patients"] = len(results["patient_summary"])
 
     return results
-
 
 # ---------------- Отчёты ----------------
 
 def print_report(results: Dict) -> None:
     print("\n=== Результаты анализа ===")
-    print(f"Всего исследований: {results['total_studies']}")
-    if results["total_studies"] > 0:
-        percent = results['labeled_studies'] / results['total_studies']
-        print(f"Размеченных исследований: {results['labeled_studies']} ({percent:.1%})")
+    print(f"Всего исследований (до фильтрации): {results['total_studies']}")
+    print(f"Обработано после фильтров: {results['processed_studies']}")
+    if results.get("filtered_out_studies"):
+        print(f"Отфильтровано исследований: {results['filtered_out_studies']}")
+
+    processed = results.get("processed_studies", 0)
+    if processed > 0:
+        percent = results['labeled_studies'] / processed
     else:
-        print(f"Размеченных исследований: {results['labeled_studies']} (0.0%)")
+        percent = 0.0
+    print(f"Размеченных исследований: {results['labeled_studies']} ({percent:.1%})")
+
+    avg_files = results.get("average_files_per_study", 0.0)
+    print(f"Среднее число DICOM-файлов на исследование: {avg_files:.1f}")
+    print(f"Уникальных пациентов: {results.get('unique_patients', 0)}")
+
+    if results.get("label_source_stats"):
+        print("\nИсточники определения разметки:")
+        for source, count in results["label_source_stats"].most_common():
+            print(f"  {source}: {count}")
 
     print("\nСтатистика по Modality:")
     for modality, count in results["modality_stats"].most_common():
         print(f"  {modality}: {count} файлов")
+
+    if results.get("series_summary"):
+        print("\nСерии с максимальным количеством файлов:")
+        series_items = sorted(
+            results["series_summary"].items(),
+            key=lambda item: item[1].get("files", 0),
+            reverse=True,
+        )[:10]
+        for uid, info in series_items:
+            studies = info.get("studies", set())
+            if isinstance(studies, set):
+                study_count = len(studies)
+            else:
+                study_count = len(list(studies))
+            modality_counts = info.get("modalities", Counter())
+            if isinstance(modality_counts, Counter):
+                mod_str = ", ".join(f"{m}:{c}" for m, c in modality_counts.most_common())
+            else:
+                mod_str = ", ".join(f"{m}:{modality_counts[m]}" for m in modality_counts)
+            print(
+                f"  {uid} | файлов: {info.get('files', 0)}, исследований: {study_count}, "
+                f"описание: {info.get('description', '')}, modality: {mod_str}"
+            )
+
+    if results.get("patient_summary"):
+        print("\nПациенты с наибольшим числом исследований:")
+        patient_items = sorted(
+            results["patient_summary"].items(),
+            key=lambda item: len(item[1]),
+            reverse=True,
+        )[:10]
+        for pid, studies in patient_items:
+            print(f"  {pid or '[empty]'}: {len(studies)} исследований")
 
     print(f"\nПустых папок найдено: {len(results.get('empty_folders', []))}")
     if results.get("empty_folders"):
@@ -493,16 +901,60 @@ def print_report(results: Dict) -> None:
 def save_report_to_txt(results: Dict, output_file: Union[str, Path]) -> None:
     with open(output_file, "w", encoding="utf-8") as f:
         f.write("=== Результаты анализа ===\n")
-        f.write(f"Всего исследований: {results['total_studies']}\n")
-        if results["total_studies"] > 0:
-            percent = results['labeled_studies'] / results['total_studies']
-            f.write(f"Размеченных исследований: {results['labeled_studies']} ({percent:.1%})\n")
+        f.write(f"Всего исследований (до фильтрации): {results['total_studies']}\n")
+        f.write(f"Обработано после фильтров: {results['processed_studies']}\n")
+        f.write(f"Отфильтровано исследований: {results.get('filtered_out_studies', 0)}\n")
+
+        processed = results.get("processed_studies", 0)
+        if processed > 0:
+            percent = results['labeled_studies'] / processed
         else:
-            f.write(f"Размеченных исследований: {results['labeled_studies']} (0.0%)\n")
+            percent = 0.0
+        f.write(f"Размеченных исследований: {results['labeled_studies']} ({percent:.1%})\n")
+        f.write(f"Среднее число DICOM-файлов на исследование: {results.get('average_files_per_study', 0.0):.1f}\n")
+        f.write(f"Уникальных пациентов: {results.get('unique_patients', 0)}\n")
+
+        if results.get("label_source_stats"):
+            f.write("\nИсточники определения разметки:\n")
+            for source, count in results["label_source_stats"].most_common():
+                f.write(f"  {source}: {count}\n")
 
         f.write("\nСтатистика по Modality:\n")
         for modality, count in results["modality_stats"].most_common():
             f.write(f"  {modality}: {count} файлов\n")
+
+        if results.get("series_summary"):
+            f.write("\nСерии с максимальным количеством файлов:\n")
+            series_items = sorted(
+                results["series_summary"].items(),
+                key=lambda item: item[1].get("files", 0),
+                reverse=True,
+            )[:10]
+            for uid, info in series_items:
+                studies = info.get("studies", set())
+                if isinstance(studies, set):
+                    study_count = len(studies)
+                else:
+                    study_count = len(list(studies))
+                modality_counts = info.get("modalities", Counter())
+                if isinstance(modality_counts, Counter):
+                    mod_str = ", ".join(f"{m}:{c}" for m, c in modality_counts.most_common())
+                else:
+                    mod_str = ", ".join(f"{m}:{modality_counts[m]}" for m in modality_counts)
+                f.write(
+                    f"  {uid} | файлов: {info.get('files', 0)}, исследований: {study_count}, "
+                    f"описание: {info.get('description', '')}, modality: {mod_str}\n"
+                )
+
+        if results.get("patient_summary"):
+            f.write("\nПациенты с наибольшим числом исследований:\n")
+            patient_items = sorted(
+                results["patient_summary"].items(),
+                key=lambda item: len(item[1]),
+                reverse=True,
+            )[:10]
+            for pid, studies in patient_items:
+                f.write(f"  {pid or '[empty]'}: {len(studies)} исследований\n")
 
         f.write(f"\nПустых папок найдено: {len(results.get('empty_folders', []))}\n")
         if results.get("empty_folders"):
@@ -540,17 +992,83 @@ def save_nonanon_to_csv(results: Dict, csv_file: Union[str, Path]) -> None:
 
 def save_report_to_json(results: Dict, json_file: Union[str, Path]) -> None:
     results_copy = dict(results)
-    results_copy["non_anonymous_studies"] = dict(results_copy["non_anonymous_studies"])
+    results_copy["non_anonymous_studies"] = {
+        key: list(values)
+        for key, values in dict(results_copy["non_anonymous_studies"]).items()
+    }
     results_copy["modality_stats"] = dict(results_copy["modality_stats"])
+    results_copy["patient_summary"] = {
+        patient: list(studies)
+        for patient, studies in results_copy.get("patient_summary", {}).items()
+    }
+    results_copy["label_source_stats"] = dict(results_copy.get("label_source_stats", {}))
+    results_copy["study_stats"] = {
+        key: value
+        for key, value in results_copy.get("study_stats", {}).items()
+    }
+
+    series_serialized: Dict[str, Dict[str, Union[str, int, Dict[str, int], List[str]]]] = {}
+    for uid, info in results_copy.get("series_summary", {}).items():
+        studies = info.get("studies", set())
+        if isinstance(studies, set):
+            studies_list = sorted(studies)
+        else:
+            studies_list = list(studies)
+        modality_counts = info.get("modalities", Counter())
+        if isinstance(modality_counts, Counter):
+            modality_counts = dict(modality_counts)
+        else:
+            modality_counts = dict(modality_counts)
+        series_serialized[uid] = {
+            "description": info.get("description", ""),
+            "modalities": modality_counts,
+            "studies": studies_list,
+            "files": int(info.get("files", 0)),
+        }
+    results_copy["series_summary"] = series_serialized
+
     with open(json_file, "w", encoding="utf-8") as f:
         json.dump(results_copy, f, ensure_ascii=False, indent=2)
 
 
+
+
 def main(argv: Optional[List[str]] = None) -> int:
+    config_parser = argparse.ArgumentParser(add_help=False)
+    config_parser.add_argument("--config", help="Путь к файлу конфигурации (YAML или JSON)")
+    config_args, remaining_argv = config_parser.parse_known_args(argv)
+
+    config_defaults: Dict[str, Union[str, int, bool, List[str], None]] = {}
+    config_dataset_path: Optional[str] = None
+    if config_args.config:
+        config_path = Path(config_args.config)
+        if not config_path.is_file():
+            print(f"Ошибка: файл конфигурации не найден: {config_path}", file=sys.stderr)
+            return 2
+        try:
+            if config_path.suffix.lower() in {".yaml", ".yml"}:
+                if yaml is None:
+                    print("Ошибка: для YAML-конфигурации требуется пакет PyYAML", file=sys.stderr)
+                    return 2
+                with open(config_path, "r", encoding="utf-8") as fh:
+                    loaded = yaml.safe_load(fh)
+            else:
+                with open(config_path, "r", encoding="utf-8") as fh:
+                    loaded = json.load(fh)
+        except Exception as exc:
+            print(f"Ошибка чтения конфигурации: {exc}", file=sys.stderr)
+            return 2
+        if not isinstance(loaded, dict):
+            print("Ошибка: конфигурационный файл должен содержать объект верхнего уровня", file=sys.stderr)
+            return 2
+        config_defaults = dict(loaded)
+        config_dataset_path = config_defaults.pop("dataset_path", None)
+
     parser = argparse.ArgumentParser(
-        description="Анализатор DICOM (расширенный): поддержка SEG, группировка по StudyInstanceUID и пр."
+        description="Анализатор DICOM (расширенный): поддержка SEG, группировка по StudyInstanceUID и пр.",
+        parents=[config_parser],
     )
-    parser.add_argument("dataset_path", help="Путь к датасету")
+    parser.add_argument("dataset_path", nargs="?", help="Путь к датасету")
     parser.add_argument("--debug", action="store_true", help="Режим отладки")
     parser.add_argument("--output", default="report.txt", help="Файл для текстового отчёта")
     parser.add_argument("--csv", action="store_true", help="Сохранять CSV-отчёты (modality и non-anonymous)")
@@ -559,7 +1077,6 @@ def main(argv: Optional[List[str]] = None) -> int:
     parser.add_argument("--csv_nonanon", default="report_nonanon.csv", help="CSV-файл с неанонимными PatientName")
     parser.add_argument("--json_file", default="report.json", help="JSON-файл для сохранения полного отчёта")
 
-    # Новые опции
     parser.add_argument("--group-by", choices=["dir", "study"], default="dir",
                         help="Группировка исследований: dir (по папкам) или study (по StudyInstanceUID)")
     parser.add_argument("--executor", choices=["process", "thread"], default="process",
@@ -570,14 +1087,48 @@ def main(argv: Optional[List[str]] = None) -> int:
     parser.add_argument("--max-depth", type=int, default=None, help="Максимальная глубина обхода (уровней)")
     parser.add_argument("--list-empty", action="store_true", help="Собирать и выводить пустые папки")
 
-    args = parser.parse_args(argv)
+    parser.add_argument("--modality-filter", nargs='+', help="Ограничить анализ указанными Modality (например, CT MR)")
+    parser.add_argument("--only-labeled", action="store_true", help="Учитывать только исследования с разметкой")
+    parser.add_argument("--only-nonanon", action="store_true", help="Учитывать только неанонимные исследования")
+    parser.add_argument("--exclude-pattern", action="append", default=None,
+                        help="Шаблон (fnmatch) для исключения файлов и директорий; можно указывать несколько раз")
+    parser.add_argument("--strict", action="store_true", help="Строгий режим: останавливать анализ при первой ошибке")
+    parser.add_argument("--batch-size", type=int, default=1,
+                        help="Размер пакета исследований для одного задания пула")
+    parser.add_argument("--no-progress", action="store_true", help="Отключить прогресс-бар tqdm")
+    parser.add_argument("--log-level", default="INFO", help="Уровень логирования (по умолчанию INFO)")
+    parser.add_argument("--log-file", help="Файл для записи логов")
+
+    parser.set_defaults(**{k: v for k, v in config_defaults.items()
+                           if k in {action.dest for action in parser._actions}})
+
+    args = parser.parse_args(remaining_argv)
+
+    if args.dataset_path is None:
+        if config_dataset_path:
+            args.dataset_path = str(config_dataset_path)
+        else:
+            print("Ошибка: не указан путь к датасету", file=sys.stderr)
+            return 2
+
+    configure_logging(args.log_level, args.log_file)
 
     if not os.path.isdir(args.dataset_path):
         print(f"Ошибка: путь не существует или не директория: {args.dataset_path}", file=sys.stderr)
         return 2
 
-    # Проверяем наличие функции анонимизации
-    
+    exclude_patterns: List[str] = []
+    if args.exclude_pattern:
+        for item in args.exclude_pattern:
+            if isinstance(item, (list, tuple, set)):
+                exclude_patterns.extend(str(x) for x in item)
+            else:
+                exclude_patterns.append(str(item))
+
+    modality_filter = args.modality_filter
+    if isinstance(modality_filter, str):
+        modality_filter = [modality_filter]
+
     print(f"Анализ датасета: {args.dataset_path}")
     results = analyze_dataset(
         args.dataset_path,
@@ -588,9 +1139,18 @@ def main(argv: Optional[List[str]] = None) -> int:
         follow_symlinks=args.follow_symlinks,
         max_depth=args.max_depth,
         list_empty=args.list_empty,
+        modality_filter=modality_filter,
+        only_labeled=args.only_labeled,
+        only_nonanon=args.only_nonanon,
+        exclude_patterns=exclude_patterns,
+        strict=args.strict,
+        no_progress=args.no_progress,
+        batch_size=args.batch_size,
     )
     print_report(results)
     save_report_to_txt(results, args.output)
+
+
 
     if args.csv:
         save_modality_to_csv(results, args.csv_modality)
@@ -601,6 +1161,7 @@ def main(argv: Optional[List[str]] = None) -> int:
         print(f"\nJSON-отчёт сохранён: {args.json_file}")
     print(f"\nОтчёт сохранён в файл: {args.output}")
     return 0
+
 
 
 if __name__ == "__main__":
