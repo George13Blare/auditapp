@@ -53,6 +53,11 @@ except Exception:  # pragma: no cover - yaml is optional
     yaml = None
 
 try:
+    import yaml  # type: ignore
+except Exception:  # pragma: no cover - yaml is optional
+    yaml = None
+
+try:
     import pydicom  # type: ignore
     from pydicom.errors import InvalidDicomError
     HAS_PYDICOM = True
@@ -96,6 +101,27 @@ LABEL_FILE_PATTERNS: Tuple[str, ...] = (
 
 YES_VALUES: Set[str] = {"y", "yes", "да", "д", "1", "true", "t"}
 NO_VALUES: Set[str] = {"n", "no", "нет", "н", "0", "false", "f"}
+
+logger = logging.getLogger(__name__)
+
+LABEL_SOP_CLASS_UIDS: Set[str] = {
+    "1.2.840.10008.5.1.4.1.1.481.3",  # RT Structure Set Storage
+    "1.2.840.10008.5.1.4.1.1.66.4",   # Segmentation Storage
+    "1.2.840.10008.5.1.4.1.1.130",    # Surface Segmentation Storage
+    "1.2.840.10008.5.1.4.1.1.481.5",  # RT Dose Storage
+    "1.2.840.10008.5.1.4.1.1.481.2",  # RT Plan Storage
+}
+
+LABEL_SERIES_KEYWORDS: Set[str] = {
+    "seg", "mask", "label", "roi", "annotation", "dose", "structure", "contour", "markup"
+}
+
+LABEL_FILE_PATTERNS: Tuple[str, ...] = (
+    "*.nii", "*.nii.gz", "*.nrrd", "*.seg.nrrd", "*.mha", "*.mhd",
+    "*mask*.png", "*mask*.jpg", "*mask*.tif", "*mask*.tiff",
+    "*label*.png", "*label*.jpg", "*label*.tif", "*label*.tiff",
+    "*.npz", "*.npy", "*.h5"
+)
 
 # --- ВСТАВЛЕНА ИСХОДНАЯ ФУНКЦИЯ АНОНИМИЗАЦИИ (без изменений) ---
 def check_dicom_anonymization(dicom_file):
@@ -610,6 +636,38 @@ def detect_dataset_structure(
         probable_grouping=probable_group,
         notes=notes,
     )
+
+@dataclass
+class WorkerConfig:
+    modality_filter: Optional[Set[str]] = None
+    strict: bool = False
+    exclude_patterns: Tuple[str, ...] = ()
+    detect_series_keywords: Set[str] = field(default_factory=lambda: set(LABEL_SERIES_KEYWORDS))
+    detect_label_file_patterns: Tuple[str, ...] = LABEL_FILE_PATTERNS
+    detect_label_json: bool = True
+
+
+def detect_label_from_dataset(ds: pydicom.dataset.Dataset, sources: Set[str]) -> None:
+    modality = str(ds.get((0x0008, 0x0060), "")).strip().upper()
+    if modality in {"RTSTRUCT", "SEG", "RTSEGANN"}:
+        sources.add(f"dicom_modality:{modality}")
+
+    sop = str(ds.get((0x0008, 0x0016), "")).strip()
+    if sop in LABEL_SOP_CLASS_UIDS:
+        sources.add(f"sop_class:{sop}")
+
+    if hasattr(ds, "SegmentSequence"):
+        sources.add("segment_sequence")
+
+    series_desc = str(ds.get((0x0008, 0x103E), "")).lower()
+    if series_desc:
+        for keyword in LABEL_SERIES_KEYWORDS:
+            if keyword in series_desc:
+                sources.add(f"series_description:{keyword}")
+                break
+
+    if str(ds.get("ContentLabel", "")).lower() in {"segmentation", "mask", "roi"}:
+        sources.add("content_label")
 
 @dataclass
 class WorkerConfig:
@@ -1178,6 +1236,7 @@ def analyze_dataset(folder_path: Union[str, Path],
     else:
         results["average_files_per_study"] = 0.0
 
+
     if schema_config:
         if schema_config.require_labels and results["total_studies"]:
             if results["labeled_studies"] < results["total_studies"]:
@@ -1513,6 +1572,30 @@ def main(argv: Optional[List[str]] = None) -> int:
     if args.dataset_path is None:
         print("Ошибка: не указан путь к датасету", file=sys.stderr)
         return 2
+
+    parser.add_argument("--modality-filter", nargs='+', help="Ограничить анализ указанными Modality (например, CT MR)")
+    parser.add_argument("--only-labeled", action="store_true", help="Учитывать только исследования с разметкой")
+    parser.add_argument("--only-nonanon", action="store_true", help="Учитывать только неанонимные исследования")
+    parser.add_argument("--exclude-pattern", action="append", default=None,
+                        help="Шаблон (fnmatch) для исключения файлов и директорий; можно указывать несколько раз")
+    parser.add_argument("--strict", action="store_true", help="Строгий режим: останавливать анализ при первой ошибке")
+    parser.add_argument("--batch-size", type=int, default=1,
+                        help="Размер пакета исследований для одного задания пула")
+    parser.add_argument("--no-progress", action="store_true", help="Отключить прогресс-бар tqdm")
+    parser.add_argument("--log-level", default="INFO", help="Уровень логирования (по умолчанию INFO)")
+    parser.add_argument("--log-file", help="Файл для записи логов")
+
+    parser.set_defaults(**{k: v for k, v in config_defaults.items()
+                           if k in {action.dest for action in parser._actions}})
+
+    args = parser.parse_args(remaining_argv)
+
+    if args.dataset_path is None:
+        if config_dataset_path:
+            args.dataset_path = str(config_dataset_path)
+        else:
+            print("Ошибка: не указан путь к датасету", file=sys.stderr)
+            return 2
 
     configure_logging(args.log_level, args.log_file)
 
