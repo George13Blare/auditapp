@@ -12,6 +12,7 @@ dcmmetatest_plus.py — расширенная версия анализатор
 - Защита от деления на ноль в отчёте.
 - Управляемая параллелизация: выбор типа пула (process/thread) и числа воркеров.
 - Контроль обхода: глубина, следование симлинкам, опциональный вывод пустых папок.
+- Авто-детект структуры датасета и поддержка внешних схем (JSON/YAML).
 - Улучшенные сообщения об ошибках и диагностика.
 - Форматы отчёта сохранены (TXT/CSV/JSON), имена флагов остаются совместимыми.
 - Кеширование заголовков DICOM для снижения количества повторных чтений.
@@ -35,6 +36,8 @@ import sys
 import json
 import csv
 import argparse
+from dataclasses import dataclass, field, asdict
+from typing import Dict, List, Tuple, Iterable, Optional, Set, Union, Any
 import logging
 import fnmatch
 from dataclasses import dataclass, field
@@ -49,9 +52,25 @@ try:
 except Exception:  # pragma: no cover - yaml is optional
     yaml = None
 
-import pydicom
-from pydicom.errors import InvalidDicomError
-from tqdm import tqdm
+try:
+    import pydicom  # type: ignore
+    from pydicom.errors import InvalidDicomError
+    HAS_PYDICOM = True
+except ImportError:  # pragma: no cover - зависит от окружения
+    pydicom = None  # type: ignore
+    HAS_PYDICOM = False
+
+    class InvalidDicomError(Exception):
+        """Заглушка, когда pydicom недоступен."""
+
+        pass
+
+try:
+    from tqdm import tqdm
+except ImportError:  # pragma: no cover - tqdm необязателен для CLI-помощи
+
+    def tqdm(iterable=None, *_, **__):
+        return iterable
 
 logger = logging.getLogger(__name__)
 
@@ -81,6 +100,10 @@ NO_VALUES: Set[str] = {"n", "no", "нет", "н", "0", "false", "f"}
 # --- ВСТАВЛЕНА ИСХОДНАЯ ФУНКЦИЯ АНОНИМИЗАЦИИ (без изменений) ---
 def check_dicom_anonymization(dicom_file):
     """Проверяет только PatientName на анонимность и возвращает Modality."""
+    if not HAS_PYDICOM:
+        raise RuntimeError(
+            "Для проверки анонимизации требуется установленный пакет pydicom"
+        )
     try:
         ds = pydicom.dcmread(dicom_file, stop_before_pixels=True)
         modality_tag = ds.get((0x0008, 0x0060))
@@ -114,6 +137,15 @@ def check_dicom_anonymization(dicom_file):
 
 # ---------------- Вспомогательные функции ----------------
 
+def _has_dicom_preamble(path: str) -> bool:
+    """Быстрая проверка преамбулы "DICM" без использования pydicom."""
+
+    try:
+        with open(path, "rb") as f:
+            head = f.read(132)
+            return len(head) >= 132 and head[128:132] == b"DICM"
+    except Exception:
+        return False
 def configure_logging(level: str = "INFO", log_file: Optional[str] = None) -> None:
     level = level.upper()
     numeric_level = getattr(logging, level, logging.INFO)
@@ -325,6 +357,9 @@ def is_dicom_file(path: Union[str, Path]) -> bool:
     path = str(path)
     if not os.path.isfile(path):
         return False
+    if not HAS_PYDICOM:
+        return _has_dicom_preamble(path)
+
     try:
         # Вариант 1: официальная функция (есть не во всех версиях pydicom)
         try:
@@ -334,14 +369,8 @@ def is_dicom_file(path: Union[str, Path]) -> bool:
             pass
 
         # Вариант 2: пролог
-        try:
-            with open(path, "rb") as f:
-                head = f.read(132)
-                if len(head) >= 132 and head[128:132] == b"DICM":
-                    return True
-        except Exception:
-            # игнорируем, перейдём к fallback
-            pass
+        if _has_dicom_preamble(path):
+            return True
 
         # Вариант 3: грубая попытка распарсить без пикселей
         try:
@@ -413,6 +442,174 @@ class StudyResult:
     file_count: int = 0
     patient_ids: List[str] = field(default_factory=list)
 
+
+# ---------------- Конфигурации и авто-детект ----------------
+
+
+@dataclass
+class SchemaConfig:
+    """Структурированное представление пользовательской схемы датасета."""
+
+    name: Optional[str] = None
+    group_by: Optional[str] = None
+    max_depth: Optional[int] = None
+    follow_symlinks: Optional[bool] = None
+    require_labels: Optional[bool] = None
+    expected_modalities: Optional[List[str]] = None
+    artifact_hints: Optional[Dict[str, Any]] = None
+
+
+@dataclass
+class SchemaSuggestion:
+    """Результат авто-детекта структуры датасета."""
+
+    dataset_path: str
+    total_files_scanned: int
+    dicom_candidates: int
+    label_candidates: int
+    other_files: int
+    top_level_dirs: List[str]
+    probable_grouping: str
+    notes: List[str] = field(default_factory=list)
+
+    def to_dict(self) -> Dict[str, Any]:
+        data = asdict(self)
+        data["schema_stub"] = {
+            "name": f"Auto-detected schema for {self.dataset_path}",
+            "group_by": self.probable_grouping,
+            "max_depth": None,
+            "follow_symlinks": False,
+            "require_labels": self.label_candidates > 0,
+        }
+        return data
+
+
+def _read_json(path: Path) -> Dict[str, Any]:
+    with open(path, "r", encoding="utf-8") as f:
+        return json.load(f)
+
+
+def load_schema_config(config_path: Optional[Union[str, Path]]) -> Optional[SchemaConfig]:
+    """Загружает файл конфигурации (JSON или YAML) и возвращает SchemaConfig."""
+
+    if not config_path:
+        return None
+    path = Path(config_path)
+    if not path.exists():
+        raise FileNotFoundError(f"Schema config not found: {config_path}")
+
+    data: Dict[str, Any]
+    if path.suffix.lower() in {".json"}:
+        data = _read_json(path)
+    elif path.suffix.lower() in {".yaml", ".yml"}:
+        try:
+            import yaml  # type: ignore
+        except Exception as exc:
+            raise RuntimeError(
+                "Для чтения YAML-конфигурации требуется пакет PyYAML"
+            ) from exc
+        with open(path, "r", encoding="utf-8") as f:
+            data = yaml.safe_load(f) or {}
+    else:
+        raise ValueError("Поддерживаются только JSON/YAML схемы")
+
+    if not isinstance(data, dict):
+        raise ValueError("Некорректный формат файла схемы: требуется JSON/YAML-объект")
+
+    return SchemaConfig(
+        name=data.get("name"),
+        group_by=data.get("group_by"),
+        max_depth=data.get("max_depth"),
+        follow_symlinks=data.get("follow_symlinks"),
+        require_labels=data.get("require_labels"),
+        expected_modalities=data.get("expected_modalities"),
+        artifact_hints=data.get("artifact_hints"),
+    )
+
+
+def detect_dataset_structure(
+    folder_path: Union[str, Path],
+    sample_limit: int = 200,
+    max_depth: int = 3,
+    follow_symlinks: bool = False,
+) -> SchemaSuggestion:
+    """Быстрая эвристическая оценка структуры датасета перед основным анализом."""
+
+    folder = Path(folder_path)
+    total_files = 0
+    dicom_hits = 0
+    label_hits = 0
+    other = 0
+    per_dir_hits: Counter = Counter()
+    sampled_paths: List[Path] = []
+
+    for idx, file_path in enumerate(
+        iter_all_files(folder, follow_symlinks=follow_symlinks, max_depth=max_depth)
+    ):
+        if idx >= sample_limit:
+            break
+        if not file_path.is_file():
+            continue
+        sampled_paths.append(file_path)
+        parent = str(file_path.parent.relative_to(folder)) or "."
+        total_files += 1
+        try:
+            if is_dicom_file(file_path):
+                dicom_hits += 1
+                per_dir_hits[parent] += 1
+                continue
+        except Exception:
+            pass
+
+        try:
+            if file_path.suffix.lower() == ".json" and is_label_json(file_path):
+                label_hits += 1
+                per_dir_hits[parent] += 1
+                continue
+        except Exception:
+            pass
+
+        other += 1
+
+    probable_group = "dir"
+    notes: List[str] = []
+    if dicom_hits > 0:
+        # Считаем, сколько разных папок содержат DICOM/разметку
+        unique_dirs = len(per_dir_hits)
+        if unique_dirs > 0:
+            avg_per_dir = dicom_hits / unique_dirs
+            if avg_per_dir < 2:
+                probable_group = "study"
+                notes.append(
+                    "Файлы DICOM распределены по многим подпапкам — рекомендуем группировку по StudyInstanceUID"
+                )
+            else:
+                notes.append(
+                    "Файлы DICOM сосредоточены в отдельных директориях — подойдёт группировка по папкам"
+                )
+    else:
+        notes.append("DICOM-файлы не обнаружены в выборке — проверьте путь или увеличьте глубину")
+
+    top_level_dirs = sorted({p.parts[0] if p.parts else "." for p in sampled_paths})
+
+    if label_hits == 0:
+        notes.append(
+            "Файлы разметки не обнаружены в выборке — при необходимости добавьте правила в схему"
+        )
+
+    if total_files >= sample_limit:
+        notes.append("Достигнут лимит выборки — структура может быть сложнее")
+
+    return SchemaSuggestion(
+        dataset_path=str(folder),
+        total_files_scanned=total_files,
+        dicom_candidates=dicom_hits,
+        label_candidates=label_hits,
+        other_files=other,
+        top_level_dirs=top_level_dirs,
+        probable_grouping=probable_group,
+        notes=notes,
+    )
 
 @dataclass
 class WorkerConfig:
@@ -530,6 +727,9 @@ def find_dicom_studies_by_uid(folder_path: Union[str, Path],
     Новая опция: группировать файлы по StudyInstanceUID.
     Возвращает dict: UID -> список файлов DICOM.
     """
+    if not HAS_PYDICOM:
+        raise RuntimeError("Группировка по UID требует установленный пакет pydicom")
+
     studies: Dict[str, List[str]] = defaultdict(list)
     for p in iter_all_files(
         folder_path,
@@ -557,6 +757,10 @@ def find_dicom_studies_by_uid(folder_path: Union[str, Path],
 
 
 # ---------------- Обработка одного исследования ----------------
+
+def _process_dir_study(study_path: str, debug: bool = False) -> StudyResult:
+    if not HAS_PYDICOM:
+        raise RuntimeError("Обработка исследований по директории требует pydicom")
 
 
 
@@ -641,6 +845,10 @@ def _process_dir_study(study_path: str, config: WorkerConfig, debug: bool = Fals
         patient_ids=sorted(patient_ids),
     )
 
+
+def _process_uid_study(uid: str, files: List[str], debug: bool = False) -> StudyResult:
+    if not HAS_PYDICOM:
+        raise RuntimeError("Обработка исследований по UID требует pydicom")
 
 
 def _process_uid_study(uid: str, files: List[str], config: WorkerConfig, debug: bool = False) -> StudyResult:
@@ -778,6 +986,10 @@ def analyze_dataset(folder_path: Union[str, Path],
                     follow_symlinks: bool = False,
                     max_depth: Optional[int] = None,
                     list_empty: bool = False,
+                    schema_config: Optional[SchemaConfig] = None) -> Dict:
+    """
+    Возвращает словарь с агрегатами по результатам.
+    """
                     modality_filter: Optional[Iterable[str]] = None,
                     only_labeled: bool = False,
                     only_nonanon: bool = False,
@@ -787,6 +999,17 @@ def analyze_dataset(folder_path: Union[str, Path],
                     batch_size: int = 1) -> Dict:
     """Возвращает словарь с агрегатами по результатам."""
     folder_path = Path(folder_path)
+
+    if not HAS_PYDICOM:
+        raise RuntimeError("Для анализа датасета необходим установленный пакет pydicom")
+
+    if schema_config:
+        if schema_config.group_by and not group_by:
+            group_by = schema_config.group_by
+        if schema_config.max_depth is not None and max_depth is None:
+            max_depth = schema_config.max_depth
+        if schema_config.follow_symlinks is not None:
+            follow_symlinks = schema_config.follow_symlinks
 
     if group_by not in {"dir", "study"}:
         raise ValueError("--group-by должен быть 'dir' или 'study'")
@@ -818,6 +1041,7 @@ def analyze_dataset(folder_path: Union[str, Path],
         "errors": [],
         "debug_info": [],
         "group_by": group_by,
+        "schema_warnings": [],
         "study_stats": {},
         "patient_summary": defaultdict(list),
         "study_file_counts": {},
@@ -954,6 +1178,20 @@ def analyze_dataset(folder_path: Union[str, Path],
     else:
         results["average_files_per_study"] = 0.0
 
+    if schema_config:
+        if schema_config.require_labels and results["total_studies"]:
+            if results["labeled_studies"] < results["total_studies"]:
+                results["schema_warnings"].append(
+                    "Схема требует разметку для каждого исследования, но найдены не все"
+                )
+        if schema_config.expected_modalities:
+            missing = set(schema_config.expected_modalities) - set(results["modality_stats"].keys())
+            if missing:
+                results["schema_warnings"].append(
+                    f"Не найдены ожидаемые Modality: {', '.join(sorted(missing))}"
+                )
+
+    return results
     results["unique_patients"] = len(results["patient_summary"])
 
     return results
@@ -1036,6 +1274,11 @@ def print_report(results: Dict) -> None:
             for p in patients:
                 print(f"  - {p}")
 
+    if results.get("schema_warnings"):
+        print("\nПредупреждения схемы:")
+        for warn in results["schema_warnings"]:
+            print(f"  - {warn}")
+
 
 def save_report_to_txt(results: Dict, output_file: Union[str, Path]) -> None:
     with open(output_file, "w", encoding="utf-8") as f:
@@ -1110,6 +1353,11 @@ def save_report_to_txt(results: Dict, output_file: Union[str, Path]) -> None:
                 f.write("Неанонимизированные PatientName:\n")
                 for p in patients:
                     f.write(f"  - {p}\n")
+
+        if results.get("schema_warnings"):
+            f.write("\nПредупреждения схемы:\n")
+            for warn in results["schema_warnings"]:
+                f.write(f"  - {warn}\n")
 
 
 def save_modality_to_csv(results: Dict, csv_file: Union[str, Path]) -> None:
@@ -1216,6 +1464,8 @@ def main(argv: Optional[List[str]] = None) -> int:
     parser.add_argument("--csv_nonanon", default="report_nonanon.csv", help="CSV-файл с неанонимными PatientName")
     parser.add_argument("--json_file", default="report.json", help="JSON-файл для сохранения полного отчёта")
 
+    # Новые опции
+    parser.add_argument("--group-by", choices=["dir", "study"], default=None,
     parser.add_argument("--group-by", choices=["dir", "study"], default="dir",
                         help="Группировка исследований: dir (по папкам) или study (по StudyInstanceUID)")
     parser.add_argument("--executor", choices=["process", "thread"], default="process",
@@ -1225,6 +1475,16 @@ def main(argv: Optional[List[str]] = None) -> int:
     parser.add_argument("--follow-symlinks", action="store_true", help="Следовать симлинкам при обходе")
     parser.add_argument("--max-depth", type=int, default=None, help="Максимальная глубина обхода (уровней)")
     parser.add_argument("--list-empty", action="store_true", help="Собирать и выводить пустые папки")
+    parser.add_argument("--schema-config", help="Путь к файлу схемы датасета (JSON/YAML)")
+    parser.add_argument("--schema-output", help="Путь для сохранения результатов авто-детекта схемы")
+    parser.add_argument("--auto-detect-schema", action="store_true",
+                        help="Выполнить быстрый анализ структуры перед основным запуском")
+    parser.add_argument("--detect-only", action="store_true",
+                        help="Только авто-детект структуры (без запуска основного анализа)")
+    parser.add_argument("--schema-sample-limit", type=int, default=200,
+                        help="Количество файлов для выборки при авто-детекте структуры")
+    parser.add_argument("--schema-depth", type=int, default=3,
+                        help="Глубина обхода при авто-детекте структуры")
 
     parser.add_argument("--modality-filter", nargs='+', help="Ограничить анализ указанными Modality (например, CT MR)")
     parser.add_argument("--only-labeled", action="store_true", help="Учитывать только исследования с разметкой")
@@ -1260,6 +1520,62 @@ def main(argv: Optional[List[str]] = None) -> int:
         print(f"Ошибка: путь не существует или не директория: {args.dataset_path}", file=sys.stderr)
         return 2
 
+    # Проверяем наличие функции анонимизации
+    
+    schema_cfg = load_schema_config(args.schema_config)
+
+    if args.auto_detect_schema or args.detect_only:
+        suggestion = detect_dataset_structure(
+            args.dataset_path,
+            sample_limit=args.schema_sample_limit,
+            max_depth=args.schema_depth,
+            follow_symlinks=(schema_cfg.follow_symlinks if schema_cfg and schema_cfg.follow_symlinks is not None else args.follow_symlinks),
+        )
+        suggestion_dict = suggestion.to_dict()
+        print("\n=== Авто-детект структуры датасета ===")
+        print(f"Проанализировано файлов: {suggestion.total_files_scanned}")
+        print(f"Найдено DICOM-кандидатов: {suggestion.dicom_candidates}")
+        print(f"Найдено файлов разметки: {suggestion.label_candidates}")
+        print(f"Прочие файлы: {suggestion.other_files}")
+        print(f"Предполагаемая группировка: {suggestion.probable_grouping}")
+        if suggestion.top_level_dirs:
+            print("Верхние директории выборки:")
+            for item in suggestion.top_level_dirs:
+                print(f"  - {item}")
+        if suggestion.notes:
+            print("Комментарии:")
+            for note in suggestion.notes:
+                print(f"  - {note}")
+
+        if args.schema_output:
+            with open(args.schema_output, "w", encoding="utf-8") as f:
+                json.dump(suggestion_dict, f, ensure_ascii=False, indent=2)
+            print(f"\nРезультаты авто-детекта сохранены в {args.schema_output}")
+
+        if args.detect_only:
+            return 0
+
+        # Если схема не указана явно, подставляем предположенное значение group_by
+        if schema_cfg is None:
+            schema_cfg = SchemaConfig(group_by=suggestion.probable_grouping)
+        elif schema_cfg.group_by is None:
+            schema_cfg.group_by = suggestion.probable_grouping
+
+    if not HAS_PYDICOM:
+        print(
+            "Ошибка: для полного анализа требуется установленный пакет pydicom. "
+            "Установите его командой 'pip install pydicom'.",
+            file=sys.stderr,
+        )
+        return 2
+
+    group_by_value = args.group_by or (schema_cfg.group_by if schema_cfg and schema_cfg.group_by else "dir")
+    max_depth_value = args.max_depth if args.max_depth is not None else (
+        schema_cfg.max_depth if schema_cfg and schema_cfg.max_depth is not None else None
+    )
+    follow_symlinks_value = args.follow_symlinks
+    if schema_cfg and schema_cfg.follow_symlinks is not None:
+        follow_symlinks_value = schema_cfg.follow_symlinks
     exclude_patterns: List[str] = []
     if args.exclude_pattern:
         for item in args.exclude_pattern:
@@ -1276,12 +1592,13 @@ def main(argv: Optional[List[str]] = None) -> int:
     results = analyze_dataset(
         args.dataset_path,
         debug=args.debug,
-        group_by=args.group_by,
+        group_by=group_by_value,
         executor_kind=args.executor,
         workers=args.workers,
-        follow_symlinks=args.follow_symlinks,
-        max_depth=args.max_depth,
+        follow_symlinks=follow_symlinks_value,
+        max_depth=max_depth_value,
         list_empty=args.list_empty,
+        schema_config=schema_cfg,
         modality_filter=modality_filter,
         only_labeled=args.only_labeled,
         only_nonanon=args.only_nonanon,
