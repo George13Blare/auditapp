@@ -37,11 +37,9 @@ import json
 import csv
 import argparse
 from dataclasses import dataclass, field, asdict
-from typing import Dict, List, Tuple, Iterable, Optional, Set, Union, Any
+from typing import Dict, List, Tuple, Iterable, Optional, Set, Union, Any, Callable
 import logging
 import fnmatch
-from dataclasses import dataclass, field
-from typing import Dict, List, Tuple, Iterable, Optional, Set, Union, Callable
 from pathlib import Path
 from collections import defaultdict, Counter
 from concurrent.futures import ProcessPoolExecutor, ThreadPoolExecutor, as_completed
@@ -758,12 +756,6 @@ def find_dicom_studies_by_uid(folder_path: Union[str, Path],
 
 # ---------------- Обработка одного исследования ----------------
 
-def _process_dir_study(study_path: str, debug: bool = False) -> StudyResult:
-    if not HAS_PYDICOM:
-        raise RuntimeError("Обработка исследований по директории требует pydicom")
-
-
-
 def _process_dir_study(study_path: str, config: WorkerConfig, debug: bool = False) -> StudyResult:
     non_anon_patients: Set[str] = set()
     patient_ids: Set[str] = set()
@@ -772,13 +764,25 @@ def _process_dir_study(study_path: str, config: WorkerConfig, debug: bool = Fals
     label_sources: Set[str] = set()
     series_raw: Dict[str, Dict[str, Union[str, int, Set[str]]]] = {}
     file_count = 0
+    has_label = False
 
+    dicom_files: List[Path] = []
     try:
         for f in Path(study_path).rglob("*"):
             if not f.is_file():
                 continue
             if should_exclude(f, config.exclude_patterns):
                 continue
+            if is_dicom_file(f):
+                dicom_files.append(f)
+            elif str(f.name).lower().endswith((".seg.nrrd", ".nrrd", ".nii", ".nii.gz", ".mha", ".mhd")):
+                has_label = True
+                label_sources.add("file_extension")
+            elif str(f.name).lower().endswith(".json") and is_label_json(f):
+                has_label = True
+                label_sources.add("json_structure")
+    except Exception as e:
+        errors.append(f"Error scanning {study_path}: {e!s}")
 
     for f in dicom_files:
         try:
@@ -788,14 +792,14 @@ def _process_dir_study(study_path: str, config: WorkerConfig, debug: bool = Fals
                 modalities.append(modality)
                 if modality in {"RTSTRUCT", "SEG", "RTSEGANN"}:
                     has_label = True
+                    label_sources.add("modality")
 
             # Проверка анонимности — строго через исходную функцию, "как есть"
-            if True:
-                is_anon, _, _ = check_dicom_anonymization(str(f))
-                if not is_anon and (0x0010, 0x0010) in ds:
-                    pn = str(ds[0x0010, 0x0010].value or "").strip()
-                    if pn:
-                        non_anon_patients.add(pn)
+            is_anon, _, _ = check_dicom_anonymization(str(f))
+            if not is_anon and (0x0010, 0x0010) in ds:
+                pn = str(ds[0x0010, 0x0010].value or "").strip()
+                if pn:
+                    non_anon_patients.add(pn)
         except Exception as e:
             errors.append(f"{f}: {e!s}")
 
@@ -986,10 +990,7 @@ def analyze_dataset(folder_path: Union[str, Path],
                     follow_symlinks: bool = False,
                     max_depth: Optional[int] = None,
                     list_empty: bool = False,
-                    schema_config: Optional[SchemaConfig] = None) -> Dict:
-    """
-    Возвращает словарь с агрегатами по результатам.
-    """
+                    schema_config: Optional[SchemaConfig] = None,
                     modality_filter: Optional[Iterable[str]] = None,
                     only_labeled: bool = False,
                     only_nonanon: bool = False,
@@ -997,7 +998,9 @@ def analyze_dataset(folder_path: Union[str, Path],
                     strict: bool = False,
                     no_progress: bool = False,
                     batch_size: int = 1) -> Dict:
-    """Возвращает словарь с агрегатами по результатам."""
+    """
+    Возвращает словарь с агрегатами по результатам.
+    """
     folder_path = Path(folder_path)
 
     if not HAS_PYDICOM:
@@ -1465,7 +1468,6 @@ def main(argv: Optional[List[str]] = None) -> int:
     parser.add_argument("--json_file", default="report.json", help="JSON-файл для сохранения полного отчёта")
 
     # Новые опции
-    parser.add_argument("--group-by", choices=["dir", "study"], default=None,
     parser.add_argument("--group-by", choices=["dir", "study"], default="dir",
                         help="Группировка исследований: dir (по папкам) или study (по StudyInstanceUID)")
     parser.add_argument("--executor", choices=["process", "thread"], default="process",
