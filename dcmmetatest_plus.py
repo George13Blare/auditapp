@@ -53,11 +53,6 @@ except Exception:  # pragma: no cover - yaml is optional
     yaml = None
 
 try:
-    import yaml  # type: ignore
-except Exception:  # pragma: no cover - yaml is optional
-    yaml = None
-
-try:
     import pydicom  # type: ignore
     from pydicom.errors import InvalidDicomError
     HAS_PYDICOM = True
@@ -101,27 +96,6 @@ LABEL_FILE_PATTERNS: Tuple[str, ...] = (
 
 YES_VALUES: Set[str] = {"y", "yes", "да", "д", "1", "true", "t"}
 NO_VALUES: Set[str] = {"n", "no", "нет", "н", "0", "false", "f"}
-
-logger = logging.getLogger(__name__)
-
-LABEL_SOP_CLASS_UIDS: Set[str] = {
-    "1.2.840.10008.5.1.4.1.1.481.3",  # RT Structure Set Storage
-    "1.2.840.10008.5.1.4.1.1.66.4",   # Segmentation Storage
-    "1.2.840.10008.5.1.4.1.1.130",    # Surface Segmentation Storage
-    "1.2.840.10008.5.1.4.1.1.481.5",  # RT Dose Storage
-    "1.2.840.10008.5.1.4.1.1.481.2",  # RT Plan Storage
-}
-
-LABEL_SERIES_KEYWORDS: Set[str] = {
-    "seg", "mask", "label", "roi", "annotation", "dose", "structure", "contour", "markup"
-}
-
-LABEL_FILE_PATTERNS: Tuple[str, ...] = (
-    "*.nii", "*.nii.gz", "*.nrrd", "*.seg.nrrd", "*.mha", "*.mhd",
-    "*mask*.png", "*mask*.jpg", "*mask*.tif", "*mask*.tiff",
-    "*label*.png", "*label*.jpg", "*label*.tif", "*label*.tiff",
-    "*.npz", "*.npy", "*.h5"
-)
 
 # --- ВСТАВЛЕНА ИСХОДНАЯ ФУНКЦИЯ АНОНИМИЗАЦИИ (без изменений) ---
 def check_dicom_anonymization(dicom_file):
@@ -669,38 +643,6 @@ def detect_label_from_dataset(ds: pydicom.dataset.Dataset, sources: Set[str]) ->
     if str(ds.get("ContentLabel", "")).lower() in {"segmentation", "mask", "roi"}:
         sources.add("content_label")
 
-@dataclass
-class WorkerConfig:
-    modality_filter: Optional[Set[str]] = None
-    strict: bool = False
-    exclude_patterns: Tuple[str, ...] = ()
-    detect_series_keywords: Set[str] = field(default_factory=lambda: set(LABEL_SERIES_KEYWORDS))
-    detect_label_file_patterns: Tuple[str, ...] = LABEL_FILE_PATTERNS
-    detect_label_json: bool = True
-
-
-def detect_label_from_dataset(ds: pydicom.dataset.Dataset, sources: Set[str]) -> None:
-    modality = str(ds.get((0x0008, 0x0060), "")).strip().upper()
-    if modality in {"RTSTRUCT", "SEG", "RTSEGANN"}:
-        sources.add(f"dicom_modality:{modality}")
-
-    sop = str(ds.get((0x0008, 0x0016), "")).strip()
-    if sop in LABEL_SOP_CLASS_UIDS:
-        sources.add(f"sop_class:{sop}")
-
-    if hasattr(ds, "SegmentSequence"):
-        sources.add("segment_sequence")
-
-    series_desc = str(ds.get((0x0008, 0x103E), "")).lower()
-    if series_desc:
-        for keyword in LABEL_SERIES_KEYWORDS:
-            if keyword in series_desc:
-                sources.add(f"series_description:{keyword}")
-                break
-
-    if str(ds.get("ContentLabel", "")).lower() in {"segmentation", "mask", "roi"}:
-        sources.add("content_label")
-
 # ---------------- Обход и группировка ----------------
 
 def iter_all_files(root: Union[str, Path],
@@ -816,12 +758,6 @@ def find_dicom_studies_by_uid(folder_path: Union[str, Path],
 
 # ---------------- Обработка одного исследования ----------------
 
-def _process_dir_study(study_path: str, debug: bool = False) -> StudyResult:
-    if not HAS_PYDICOM:
-        raise RuntimeError("Обработка исследований по директории требует pydicom")
-
-
-
 def _process_dir_study(study_path: str, config: WorkerConfig, debug: bool = False) -> StudyResult:
     non_anon_patients: Set[str] = set()
     patient_ids: Set[str] = set()
@@ -830,13 +766,20 @@ def _process_dir_study(study_path: str, config: WorkerConfig, debug: bool = Fals
     label_sources: Set[str] = set()
     series_raw: Dict[str, Dict[str, Union[str, int, Set[str]]]] = {}
     file_count = 0
+    has_label = False
 
+    dicom_files = []
     try:
         for f in Path(study_path).rglob("*"):
             if not f.is_file():
                 continue
             if should_exclude(f, config.exclude_patterns):
                 continue
+            if is_dicom_file(f):
+                dicom_files.append(f)
+                file_count += 1
+    except Exception as e:
+        errors.append(f"Ошибка обхода директории {study_path}: {e!s}")
 
     for f in dicom_files:
         try:
@@ -904,11 +847,6 @@ def _process_dir_study(study_path: str, config: WorkerConfig, debug: bool = Fals
     )
 
 
-def _process_uid_study(uid: str, files: List[str], debug: bool = False) -> StudyResult:
-    if not HAS_PYDICOM:
-        raise RuntimeError("Обработка исследований по UID требует pydicom")
-
-
 def _process_uid_study(uid: str, files: List[str], config: WorkerConfig, debug: bool = False) -> StudyResult:
     non_anon_patients: Set[str] = set()
     patient_ids: Set[str] = set()
@@ -917,6 +855,7 @@ def _process_uid_study(uid: str, files: List[str], config: WorkerConfig, debug: 
     label_sources: Set[str] = set()
     series_raw: Dict[str, Dict[str, Union[str, int, Set[str]]]] = {}
     file_count = 0
+    has_label = False
     rep_path = str(Path(files[0]).parent) if files else None
 
     for f in files:
@@ -1035,26 +974,24 @@ def _process_uid_batch(items: List[Tuple[str, List[str]]], config: WorkerConfig,
 # ---------------- Основной конвейер ----------------
 
 
-
-def analyze_dataset(folder_path: Union[str, Path],
-                    debug: bool = False,
-                    group_by: str = "dir",
-                    executor_kind: str = "process",
-                    workers: Optional[int] = None,
-                    follow_symlinks: bool = False,
-                    max_depth: Optional[int] = None,
-                    list_empty: bool = False,
-                    schema_config: Optional[SchemaConfig] = None) -> Dict:
-    """
-    Возвращает словарь с агрегатами по результатам.
-    """
-                    modality_filter: Optional[Iterable[str]] = None,
-                    only_labeled: bool = False,
-                    only_nonanon: bool = False,
-                    exclude_patterns: Optional[Iterable[str]] = None,
-                    strict: bool = False,
-                    no_progress: bool = False,
-                    batch_size: int = 1) -> Dict:
+def analyze_dataset(
+    folder_path: Union[str, Path],
+    debug: bool = False,
+    group_by: str = "dir",
+    executor_kind: str = "process",
+    workers: Optional[int] = None,
+    follow_symlinks: bool = False,
+    max_depth: Optional[int] = None,
+    list_empty: bool = False,
+    schema_config: Optional[SchemaConfig] = None,
+    modality_filter: Optional[Iterable[str]] = None,
+    only_labeled: bool = False,
+    only_nonanon: bool = False,
+    exclude_patterns: Optional[Iterable[str]] = None,
+    strict: bool = False,
+    no_progress: bool = False,
+    batch_size: int = 1
+) -> Dict:
     """Возвращает словарь с агрегатами по результатам."""
     folder_path = Path(folder_path)
 
@@ -1524,7 +1461,6 @@ def main(argv: Optional[List[str]] = None) -> int:
     parser.add_argument("--json_file", default="report.json", help="JSON-файл для сохранения полного отчёта")
 
     # Новые опции
-    parser.add_argument("--group-by", choices=["dir", "study"], default=None,
     parser.add_argument("--group-by", choices=["dir", "study"], default="dir",
                         help="Группировка исследований: dir (по папкам) или study (по StudyInstanceUID)")
     parser.add_argument("--executor", choices=["process", "thread"], default="process",
