@@ -268,7 +268,7 @@ def normalize_dataset(
     stats.total_files = len(dcm_files)
 
     # Группировка по пациентам/исследованиям
-    patient_studies = {}  # {patient_id: {study_id: [files]}}
+    patient_studies: dict[str, dict[str, dict]] = {}
 
     for dcm_file in dcm_files:
         try:
@@ -301,7 +301,7 @@ def normalize_dataset(
             stats.failed_files += 1
 
     stats.total_patients = len(patient_studies)
-    stats.total_studies = sum(len(studies) for studies in patient_studies.values())
+    stats.total_studies = sum((len(studies) for studies in patient_studies.values()), 0)
 
     # Нормализация структуры
     if config.target_structure == "patient_study_series":
