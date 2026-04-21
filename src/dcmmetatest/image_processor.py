@@ -8,9 +8,10 @@ import logging
 from dataclasses import dataclass
 from enum import Enum
 from pathlib import Path
-from typing import Optional
+from typing import Optional, cast
 
 import numpy as np
+import numpy.typing as npt
 
 logger = logging.getLogger(__name__)
 
@@ -133,21 +134,24 @@ def normalize_intensity(
         max_val = array.max()
         if max_val - min_val < 1e-6:
             return np.zeros_like(array, dtype=np.float32)
-        return ((array - min_val) / (max_val - min_val)).astype(np.float32)
+        result = ((array - min_val) / (max_val - min_val)).astype(np.float32)
+        return cast(npt.NDArray[np.float32], result)
 
     elif method == "zscore":
         mean = array.mean()
         std = array.std()
         if std < 1e-6:
             return np.zeros_like(array, dtype=np.float32)
-        return ((array - mean) / std).astype(np.float32)
+        result = ((array - mean) / std).astype(np.float32)
+        return cast(npt.NDArray[np.float32], result)
 
     elif method == "sigmoid":
         mean = array.mean()
         std = array.std()
         if std < 1e-6:
             return np.full_like(array, 0.5, dtype=np.float32)
-        return (1 / (1 + np.exp(-(array - mean) / std))).astype(np.float32)
+        result = (1 / (1 + np.exp(-(array - mean) / std))).astype(np.float32)
+        return cast(npt.NDArray[np.float32], result)
 
     else:
         raise ValueError(f"Неизвестный метод нормализации: {method}")
@@ -596,4 +600,4 @@ def create_overlay_image(image: np.ndarray, mask: np.ndarray, colormap: str = "j
     result = result * (1 - mask_rgba[..., 3:4]) + mask_rgba[..., :3] * mask_rgba[..., 3:4]
     result = np.clip(result * 255, 0, 255).astype(np.uint8)
 
-    return result
+    return cast(npt.NDArray[np.uint8], result)
