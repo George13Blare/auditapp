@@ -7,10 +7,20 @@ import logging
 import random
 import shutil
 from dataclasses import dataclass, field
+from enum import Enum
 from pathlib import Path
 from typing import Any
 
 logger = logging.getLogger(__name__)
+
+
+class DatasetTaskType(str, Enum):
+    """Тип задачи для подготовки датасета."""
+
+    SEGMENTATION = "segmentation"  # Семантическая сегментация
+    CLASSIFICATION = "classification"  # Классификация изображений/срезов
+    DETECTION = "detection"  # Детекция объектов (bounding boxes)
+    SLICE_CLASSIFICATION = "slice_classification"  # Классификация отдельных срезов
 
 
 @dataclass
@@ -38,6 +48,9 @@ class SegmentationMask:
 class NormalizationConfig:
     """Конфигурация нормализации."""
 
+    # Тип задачи
+    task_type: DatasetTaskType = DatasetTaskType.SEGMENTATION
+
     # Целевая структура
     target_structure: str = "patient_study_series"  # patient_study_series, flat, custom
 
@@ -56,6 +69,17 @@ class NormalizationConfig:
     # Сегментация
     process_segmentations: bool = True
     segmentation_output_dir: str = "segmentations"
+
+    # Классификация
+    classification_source: str = "dicom_tags"  # dicom_tags, csv, folder_name
+    label_column: str = "label"  # Для CSV
+    dicom_tag_for_label: str = "SeriesDescription"  # Тег DICOM для лейбла
+    export_slices: bool = False  # Экспортировать срезы как PNG/JPG
+    slices_format: str = "png"  # png, jpg
+
+    # Детекция
+    detection_export_format: str = "yolo"  # yolo, coco, voc
+    include_bounding_boxes: bool = True
 
 
 @dataclass
@@ -231,7 +255,7 @@ def save_class_dictionary(class_dict: dict[str, ClassMapping], json_path: Path) 
         return False
 
 
-def normalize_dataset(
+def _normalize_dataset_original(
     input_path: str,
     output_path: str,
     config: NormalizationConfig,
@@ -262,7 +286,7 @@ def normalize_dataset(
 
     # Сбор информации о файлах
     all_files = list(input_dir.rglob("*"))
-    dcm_files = [f for f in all_files if f.suffix.lower() in [".dcm", ".dicom", ""]]
+    dcm_files = [f for f in all_files if f.is_file() and f.suffix.lower() in [".dcm", ".dicom", ""]]
     seg_files = []
 
     stats.total_files = len(dcm_files)
@@ -349,6 +373,198 @@ def normalize_dataset(
                             shutil.copy2(seg_file, seg_dir / seg_file.name)
                         except Exception as e:
                             logger.error(f"Ошибка копирования сегментации {seg_file}: {e}")
+
+    # Обработка для классификации
+    if config.task_type == DatasetTaskType.CLASSIFICATION:
+        _process_classification(output_dir, patient_studies, config)
+
+    return stats
+
+
+def _process_classification(
+    output_dir: Path,
+    patient_studies: dict[str, dict[str, dict]],
+    config: NormalizationConfig,
+) -> None:
+    """
+    Обрабатывает датасет для задачи классификации.
+
+    Создает структуру по классам и опционально экспортирует срезы.
+    """
+    if config.classification_source == "dicom_tags":
+        # Группировка по тегу DICOM
+        class_groups: dict[str, list[Path]] = {}
+
+        for _patient_id, studies in patient_studies.items():
+            for _study_id, study_data in studies.items():
+                for dcm_file in study_data["files"]:
+                    try:
+                        import pydicom
+
+                        ds = pydicom.dcmread(dcm_file, force=True)
+                        label = getattr(ds, config.dicom_tag_for_label, "UNKNOWN")
+
+                        if label not in class_groups:
+                            class_groups[label] = []
+                        class_groups[label].append(dcm_file)
+                    except Exception:
+                        continue
+
+        # Создание структуры по классам
+        classes_dir = output_dir / "classification"
+        classes_dir.mkdir(exist_ok=True)
+
+        for class_name, files in class_groups.items():
+            class_dir = classes_dir / class_name
+            class_dir.mkdir(exist_ok=True)
+
+            for idx, src_file in enumerate(files):
+                dst_file = class_dir / f"{class_name}_{idx}.dcm"
+                try:
+                    shutil.copy2(src_file, dst_file)
+                except Exception as e:
+                    logger.error(f"Ошибка копирования {src_file}: {e}")
+
+        # Сохранение манифеста классов
+        manifest = {
+            "task_type": "classification",
+            "classes": list(class_groups.keys()),
+            "samples_per_class": {k: len(v) for k, v in class_groups.items()},
+        }
+        with open(classes_dir / "manifest.json", "w", encoding="utf-8") as f:
+            json.dump(manifest, f, indent=2, ensure_ascii=False)
+
+    elif config.classification_source == "folder_name":
+        # Использование имени папки как класса
+        pass  # Реализуется при необходимости
+
+    elif config.classification_source == "csv":
+        # Загрузка лейблов из CSV
+        pass  # Реализуется при необходимости
+
+
+def normalize_dataset(
+    input_path: str,
+    output_path: str,
+    config: NormalizationConfig,
+    class_dict_path: str | None = None,
+) -> NormalizationStats:
+    """
+    Нормализует структуру DICOM-датасета.
+
+    Args:
+        input_path: Путь к исходному датасету
+        output_path: Путь для нормализованного датасета
+        config: Конфигурация нормализации
+        class_dict_path: Опциональный путь к словарю классов
+
+    Returns:
+        Статистика нормализации
+    """
+    stats = NormalizationStats()
+    input_dir = Path(input_path)
+    output_dir = Path(output_path)
+
+    # Загрузка словаря классов если указан
+    if class_dict_path and Path(class_dict_path).exists():
+        load_class_dictionary(Path(class_dict_path))
+
+    # Создание выходной директории
+    output_dir.mkdir(parents=True, exist_ok=True)
+
+    # Сбор информации о файлах
+    all_files = list(input_dir.rglob("*"))
+    dcm_files = [f for f in all_files if f.is_file() and f.suffix.lower() in [".dcm", ".dicom", ""]]
+    seg_files = []
+
+    stats.total_files = len(dcm_files)
+
+    # Группировка по пациентам/исследованиям
+    patient_studies: dict[str, dict[str, dict]] = {}
+
+    for dcm_file in dcm_files:
+        try:
+            import pydicom
+
+            ds = pydicom.dcmread(dcm_file, force=True)
+
+            patient_id = getattr(ds, "PatientID", "UNKNOWN")
+            study_id = getattr(ds, "StudyInstanceUID", "UNKNOWN")
+            series_id = getattr(ds, "SeriesInstanceUID", "UNKNOWN")
+
+            if patient_id not in patient_studies:
+                patient_studies[patient_id] = {}
+            if study_id not in patient_studies[patient_id]:
+                patient_studies[patient_id][study_id] = {"series": {}, "files": []}
+
+            patient_studies[patient_id][study_id]["files"].append(dcm_file)
+
+            if series_id not in patient_studies[patient_id][study_id]["series"]:
+                patient_studies[patient_id][study_id]["series"][series_id] = []
+            patient_studies[patient_id][study_id]["series"][series_id].append(dcm_file)
+
+            # Проверка на сегментацию
+            if hasattr(ds, "Modality") and ds.Modality == "SEG":
+                seg_files.append(dcm_file)
+                stats.segmentations_found += 1
+
+        except Exception as e:
+            logger.warning(f"Ошибка чтения файла {dcm_file}: {e}")
+            stats.failed_files += 1
+
+    stats.total_patients = len(patient_studies)
+    stats.total_studies = sum((len(studies) for studies in patient_studies.values()), 0)
+
+    # Нормализация структуры
+    if config.target_structure == "patient_study_series":
+        for patient_id, studies in patient_studies.items():
+            patient_dir = output_dir / f"patient_{patient_id}"
+            patient_dir.mkdir(exist_ok=True)
+
+            for study_id, study_data in studies.items():
+                study_dir = patient_dir / f"study_{study_id}"
+                study_dir.mkdir(exist_ok=True)
+
+                # Копирование файлов изображений
+                for series_id, series_files in study_data["series"].items():
+                    series_dir = study_dir / f"series_{series_id}"
+                    series_dir.mkdir(exist_ok=True)
+
+                    for idx, src_file in enumerate(series_files):
+                        if config.rename_files:
+                            new_name = config.file_pattern.format(
+                                patient=patient_id,
+                                study=study_id[:8],
+                                series=series_id[:8],
+                                index=idx,
+                            )
+                            if not new_name.endswith(".dcm"):
+                                new_name += ".dcm"
+                        else:
+                            new_name = src_file.name
+
+                        dst_file = series_dir / new_name
+                        try:
+                            shutil.copy2(src_file, dst_file)
+                            stats.processed_files += 1
+                        except Exception as e:
+                            logger.error(f"Ошибка копирования {src_file}: {e}")
+                            stats.failed_files += 1
+
+                # Копирование сегментаций
+                if config.process_segmentations and seg_files:
+                    seg_dir = study_dir / config.segmentation_output_dir
+                    seg_dir.mkdir(exist_ok=True)
+
+                    for seg_file in seg_files:
+                        try:
+                            shutil.copy2(seg_file, seg_dir / seg_file.name)
+                        except Exception as e:
+                            logger.error(f"Ошибка копирования сегментации {seg_file}: {e}")
+
+    # Обработка для классификации
+    if config.task_type == DatasetTaskType.CLASSIFICATION:
+        _process_classification(output_dir, patient_studies, config)
 
     # Сохранение метаданных
     if config.extract_metadata:
