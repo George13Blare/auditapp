@@ -143,6 +143,9 @@ def run_analysis(
     label_source_counter: Counter = Counter()
     series_max: list[tuple[str, int]] = []
     patient_study_map: dict[str, list[str]] = defaultdict(list)
+    date_distribution: Counter = Counter()
+    age_distribution: Counter = Counter()
+    quality_issues: Counter = Counter()
 
     for r in filtered_results:
         if r.has_label:
@@ -168,12 +171,19 @@ def run_analysis(
         for pid in r.patient_ids:
             patient_study_map[pid].append(r.study_key)
 
+        # Сбор дат для распределения
+        if r.study_date:
+            date_distribution[r.study_date] += 1
+
     report.labeled_studies = labeled_count
     report.non_anon_studies = non_anon_count
     report.total_dicom_files = total_files
     report.unique_patients = len(all_patient_ids)
     report.modality_stats = dict(modality_counter)
     report.label_source_stats = dict(label_source_counter)
+    report.study_date_distribution = dict(date_distribution)
+    report.age_distribution = dict(age_distribution)
+    report.quality_issues = dict(quality_issues)
 
     # Топ серий по количеству файлов
     series_max.sort(key=lambda x: x[1], reverse=True)

@@ -12,6 +12,7 @@ class StudyResult:
     study_key: str
     has_label: bool = False
     non_anon_patients: list[str] = field(default_factory=list)
+    non_anon_files: list[str] = field(default_factory=list)  # Файлы с неанонимизированными данными
     modalities: list[str] = field(default_factory=list)
     errors: list[str] = field(default_factory=list)
     study_path_rep: str = ""
@@ -19,6 +20,7 @@ class StudyResult:
     series: dict[str, dict[str, str | int | list[str]]] = field(default_factory=dict)
     file_count: int = 0
     patient_ids: list[str] = field(default_factory=list)
+    study_date: str = ""  # Дата исследования для аналитики
 
 
 @dataclass
@@ -61,3 +63,7 @@ class AnalysisReport:
     empty_folders: list[str] = field(default_factory=list)
     errors: list[str] = field(default_factory=list)
     results: list[StudyResult] = field(default_factory=list)
+    # Расширенная аналитика
+    study_date_distribution: dict[str, int] = field(default_factory=dict)  # Распределение по датам
+    age_distribution: dict[str, int] = field(default_factory=dict)  # Распределение по возрастным группам
+    quality_issues: dict[str, int] = field(default_factory=dict)  # Проблемы качества (битые файлы и т.д.)

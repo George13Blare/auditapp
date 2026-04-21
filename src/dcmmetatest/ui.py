@@ -37,7 +37,9 @@ def convert_report_to_dataframe(report: AnalysisReport) -> pd.DataFrame:
             "Modalities": ", ".join(study.modalities) if study.modalities else "N/A",
             "Series Count": len(study.series),
             "Non-Anon Patient": "⚠️" if study.non_anon_patients else "✅",
+            "Non-Anon Files": len(study.non_anon_files),
             "Label Sources": ", ".join(study.label_sources) if study.label_sources else "-",
+            "Study Date": study.study_date if study.study_date else "N/A",
         }
         rows.append(row)
 
@@ -137,7 +139,68 @@ def create_quality_metrics_cards(report: AnalysisReport) -> dict[str, Any]:
         "avg_files_per_study": round(report.total_dicom_files / total_studies, 1),
         "empty_folders": len(report.empty_folders),
         "errors_count": len(report.errors),
+        "non_anon_files_total": sum(len(r.non_anon_files) for r in report.results),
+        "quality_issues_total": sum(report.quality_issues.values()) if report.quality_issues else 0,
     }
+
+
+def create_study_date_timeline(report: AnalysisReport) -> go.Figure | None:
+    """
+    Создаёт временную шкалу исследований.
+
+    Args:
+        report: Отчёт анализа
+
+    Returns:
+        Plotly Figure или None
+    """
+    if not report.study_date_distribution:
+        fig = go.Figure()
+        fig.add_annotation(text="Нет данных о датах исследований", showarrow=False)
+        return fig
+
+    dates = sorted(report.study_date_distribution.keys())
+    counts = [report.study_date_distribution[d] for d in dates]
+
+    fig = px.line(
+        x=dates,
+        y=counts,
+        title="Распределение исследований по датам",
+        labels={"x": "Дата", "y": "Количество исследований"},
+        markers=True,
+    )
+    fig.update_layout(height=400, xaxis_tickangle=-45)
+    return fig
+
+
+def create_age_distribution_chart(report: AnalysisReport) -> go.Figure | None:
+    """
+    Создаёт диаграмму распределения по возрастным группам.
+
+    Args:
+        report: Отчёт анализа
+
+    Returns:
+        Plotly Figure или None
+    """
+    if not report.age_distribution:
+        fig = go.Figure()
+        fig.add_annotation(text="Нет данных о возрасте пациентов", showarrow=False)
+        return fig
+
+    age_groups = list(report.age_distribution.keys())
+    counts = list(report.age_distribution.values())
+
+    fig = px.bar(
+        x=age_groups,
+        y=counts,
+        title="Распределение пациентов по возрастным группам",
+        labels={"x": "Возрастная группа", "y": "Количество пациентов"},
+        color=counts,
+        color_continuous_scale="Blues",
+    )
+    fig.update_layout(height=400, showlegend=False)
+    return fig
 
 
 @cache_data(ttl=3600)
