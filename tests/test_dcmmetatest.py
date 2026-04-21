@@ -1,10 +1,9 @@
 """Тесты для модуля dcmmetatest."""
 
-import pytest
-from pathlib import Path
-import tempfile
-import os
 import sys
+from pathlib import Path
+
+import pytest
 
 sys.path.insert(0, str(Path(__file__).parent.parent / "src"))
 
@@ -18,7 +17,7 @@ class TestHelpers:
 
         path = Path("/test/file.dcm")
         assert should_exclude(path, ()) is False
-        assert should_exclude(path, tuple()) is False
+        assert should_exclude(path, ()) is False
 
     def test_should_exclude_with_pattern(self):
         """Тест: исключение по шаблону."""

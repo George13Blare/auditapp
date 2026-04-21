@@ -6,17 +6,16 @@ import argparse
 import logging
 import sys
 from pathlib import Path
-from typing import List, Optional, Set, Tuple
 
-from .models import WorkerConfig, AnalysisReport
+from .analyzer import print_summary, run_analysis
+from .io import load_config_file, save_report_csv, save_report_json, save_report_txt
+from .models import WorkerConfig
 from .utils import (
     configure_logging,
+    prompt_choice,
     prompt_with_default,
     prompt_yes_no,
-    prompt_choice,
 )
-from .io import load_config_file, save_report_txt, save_report_csv, save_report_json
-from .analyzer import run_analysis, print_summary
 
 logger = logging.getLogger(__name__)
 
@@ -24,7 +23,7 @@ logger = logging.getLogger(__name__)
 def create_parser() -> argparse.ArgumentParser:
     """
     Создаёт парсер аргументов командной строки.
-    
+
     Returns:
         Настроенный ArgumentParser
     """
@@ -39,17 +38,19 @@ def create_parser() -> argparse.ArgumentParser:
   %(prog)s /path/to/data --interactive
         """,
     )
-    
+
     parser.add_argument(
         "input_path",
         help="Путь к корневой директории с DICOM-данными",
     )
     parser.add_argument(
-        "-o", "--output",
+        "-o",
+        "--output",
         help="Путь к файлу отчёта (расширение определяет формат)",
     )
     parser.add_argument(
-        "-f", "--format",
+        "-f",
+        "--format",
         choices=["txt", "csv", "json"],
         default="txt",
         help="Формат отчёта (по умолчанию: txt)",
@@ -61,7 +62,8 @@ def create_parser() -> argparse.ArgumentParser:
         help="Режим группировки: dir (по директориям) или study (по StudyInstanceUID)",
     )
     parser.add_argument(
-        "-w", "--workers",
+        "-w",
+        "--workers",
         type=int,
         help="Количество воркеров (по умолчанию: число CPU)",
     )
@@ -128,7 +130,8 @@ def create_parser() -> argparse.ArgumentParser:
         help="Режим отладки",
     )
     parser.add_argument(
-        "-v", "--verbose",
+        "-v",
+        "--verbose",
         action="count",
         default=0,
         help="Увеличить уровень логирования (-v, -vv)",
@@ -146,41 +149,41 @@ def create_parser() -> argparse.ArgumentParser:
         action="store_true",
         help="Интерактивный режим настройки",
     )
-    
+
     return parser
 
 
 def interactive_setup() -> WorkerConfig:
     """
     Запускает интерактивный режим настройки.
-    
+
     Returns:
         Настроенная конфигурация воркера
     """
     print("\n=== Интерактивный режим настройки ===")
     print("Ответьте на несколько вопросов, чтобы выбрать нужный функционал.\n")
-    
+
     # Путь к данным
     input_path = prompt_with_default(
         "Путь к директории с DICOM-данными",
         default=".",
     )
-    
+
     if not Path(input_path).exists():
         print("Указанный путь не найден или не является директорией.")
         sys.exit(1)
-    
+
     # Режим группировки
     group_by = prompt_choice(
         "Режим группировки исследований",
         choices=["dir", "study"],
         default="dir",
     )
-    
+
     # Фильтры
     only_labeled = prompt_yes_no("Показывать только размеченные исследования?", default=False)
     only_non_anon = prompt_yes_no("Показывать только неанонимные исследования?", default=False)
-    
+
     modality_filter = None
     if prompt_yes_no("Фильтровать по модальности?", default=False):
         mod_input = prompt_with_default(
@@ -189,7 +192,7 @@ def interactive_setup() -> WorkerConfig:
         )
         if mod_input:
             modality_filter = {m.strip().upper() for m in mod_input.split(",")}
-    
+
     # Параметры обработки
     max_workers_str = prompt_with_default(
         "Количество воркеров (оставьте пустым для авто)",
@@ -197,67 +200,72 @@ def interactive_setup() -> WorkerConfig:
         allow_empty=True,
     )
     max_workers = int(max_workers_str) if max_workers_str.isdigit() else None
-    
+
     pool_type = prompt_choice(
         "Тип пула воркеров",
         choices=["process", "thread"],
         default="process",
     )
-    
+
     follow_symlinks = prompt_yes_no("Следовать за симлинками?", default=False)
-    
+
     max_depth_str = prompt_with_default(
         "Максимальная глубина обхода (пусто = без ограничений)",
         default="",
         allow_empty=True,
     )
     max_depth = int(max_depth_str) if max_depth_str.isdigit() else None
-    
+
     list_empty = prompt_yes_no("Включать пустые директории в отчёт?", default=False)
     show_progress = prompt_yes_no("Показывать прогресс-бар?", default=True)
-    
+
     # Формат отчёта
     report_format = prompt_choice(
         "Формат отчёта",
         choices=["txt", "csv", "json"],
         default="txt",
     )
-    
+
     output_path = prompt_with_default(
         "Путь к файлу отчёта (пусто = только консоль)",
         default="",
         allow_empty=True,
     )
-    
+
     print("\nНастройка завершена. Запускаем анализ...\n")
-    
-    return WorkerConfig(
-        group_by=group_by,
-        only_labeled=only_labeled,
-        only_non_anon=only_non_anon,
-        modality_filter=modality_filter,
-        max_workers=max_workers,
-        pool_type=pool_type,
-        follow_symlinks=follow_symlinks,
-        max_depth=max_depth,
-        list_empty=list_empty,
-        show_progress=show_progress,
-    ), input_path, report_format, output_path  # type: ignore
+
+    return (
+        WorkerConfig(
+            group_by=group_by,
+            only_labeled=only_labeled,
+            only_non_anon=only_non_anon,
+            modality_filter=modality_filter,
+            max_workers=max_workers,
+            pool_type=pool_type,
+            follow_symlinks=follow_symlinks,
+            max_depth=max_depth,
+            list_empty=list_empty,
+            show_progress=show_progress,
+        ),
+        input_path,
+        report_format,
+        output_path,
+    )  # type: ignore
 
 
-def main(argv: Optional[List[str]] = None) -> int:
+def main(argv: list[str] | None = None) -> int:
     """
     Точка входа CLI.
-    
+
     Args:
         argv: Аргументы командной строки (по умолчанию sys.argv[1:])
-        
+
     Returns:
         Код выхода
     """
     parser = create_parser()
     args = parser.parse_args(argv)
-    
+
     # Интерактивный режим
     if args.interactive:
         config, input_path, report_format, output_path = interactive_setup()
@@ -266,7 +274,7 @@ def main(argv: Optional[List[str]] = None) -> int:
         args.output = output_path
     else:
         config = WorkerConfig()
-    
+
     # Загрузка конфигурации из файла
     if args.config:
         try:
@@ -297,7 +305,7 @@ def main(argv: Optional[List[str]] = None) -> int:
         except Exception as e:
             logger.error("Ошибка загрузки конфигурации: %s", e)
             return 1
-    
+
     # Переопределение аргументами CLI
     if args.group_by:
         config.group_by = args.group_by
@@ -325,7 +333,7 @@ def main(argv: Optional[List[str]] = None) -> int:
         config.show_progress = False
     if args.strict:
         config.strict = args.strict
-    
+
     # Настройка логирования
     log_level = "INFO"
     if args.verbose >= 2:
@@ -334,29 +342,29 @@ def main(argv: Optional[List[str]] = None) -> int:
         log_level = "INFO"
     elif args.debug:
         log_level = "DEBUG"
-    
+
     configure_logging(level=log_level, log_file=args.log_file)
-    
+
     # Проверка входного пути
     if not Path(args.input_path).exists():
         logger.error("Директория не найдена: %s", args.input_path)
         return 1
-    
+
     # Запуск анализа
     try:
         report = run_analysis(args.input_path, config, debug=args.debug)
     except Exception as e:
         logger.error("Ошибка анализа: %s", e)
         return 1
-    
+
     # Вывод результатов
     print_summary(report)
-    
+
     # Сохранение отчёта
     if args.output:
         output_path = args.output
         fmt = args.format
-        
+
         # Автоопределение формата по расширению
         if output_path.endswith(".csv"):
             fmt = "csv"
@@ -364,7 +372,7 @@ def main(argv: Optional[List[str]] = None) -> int:
             fmt = "json"
         elif output_path.endswith(".txt"):
             fmt = "txt"
-        
+
         try:
             if fmt == "txt":
                 save_report_txt(report, output_path)
@@ -376,7 +384,7 @@ def main(argv: Optional[List[str]] = None) -> int:
         except Exception as e:
             logger.error("Ошибка сохранения отчёта: %s", e)
             return 1
-    
+
     return 0
 
 

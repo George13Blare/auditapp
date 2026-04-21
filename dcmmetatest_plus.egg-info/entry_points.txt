@@ -1,0 +1,2 @@
+[console_scripts]
+dcmmetatest-plus = src.dcmmetatest.cli:main
