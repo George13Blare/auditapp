@@ -164,29 +164,6 @@ def prompt_choice(prompt: str, choices: list[str], default: str | None = None) -
         print(f"Пожалуйста, выберите одно из значений: {choices_display}.")
 
 
-def extract_modality(ds: Dataset | None) -> str | None:
-    """
-    Извлекает модальность из DICOM-датасета.
-
-    Args:
-        ds: DICOM dataset или None
-
-    Returns:
-        Строка модальности или None
-    """
-    if ds is None:
-        return None
-
-    try:
-        modality_tag = ds.get((0x0008, 0x0060))
-        if modality_tag:
-            return str(modality_tag.value).strip().upper()
-    except Exception:
-        pass
-
-    return "UNKNOWN"
-
-
 def check_dicom_anonymization(dicom_file: str) -> tuple[bool, str, str | None]:
     """
     Проверяет анонимизацию DICOM-файла.
@@ -227,4 +204,5 @@ def check_dicom_anonymization(dicom_file: str) -> tuple[bool, str, str | None]:
                 return False, modality, f"PatientName: '{ds[0x0010, 0x0010].value}'"
         return True, modality, None
     except Exception as e:
+        logger.debug("Ошибка проверки анонимизации %s: %s", dicom_file, e)
         return False, "ERROR", f"Ошибка чтения: {str(e)}"

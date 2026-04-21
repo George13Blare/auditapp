@@ -126,14 +126,16 @@ def is_dicom_file(path: Path) -> bool:
             head = f.read(132)
             if len(head) >= 132 and head[128:132] == b"DICM":
                 return True
-    except Exception:
+    except Exception as e:
+        logger.debug("Ошибка при проверке преамбулы DICOM %s: %s", path, e)
         pass
 
     # Fallback через pydicom
     try:
         pydicom.dcmread(str(path), stop_before_pixels=True, force=True)
         return True
-    except Exception:
+    except Exception as e:
+        logger.debug("Ошибка при чтении DICOM %s: %s", path, e)
         return False
 
 
@@ -165,7 +167,8 @@ def is_label_json(path: Path) -> bool:
             label_keys = {"annotations", "segments", "labels", "regions", "roi"}
             if any(key in data for key in label_keys):
                 return True
-    except Exception:
+    except Exception as e:
+        logger.debug("Ошибка при проверке JSON %s: %s", path, e)
         pass
 
     return False
@@ -188,7 +191,8 @@ def extract_modality(ds: Dataset | None) -> str | None:
         modality_tag = ds.get((0x0008, 0x0060))
         if modality_tag:
             return str(modality_tag.value).strip().upper()
-    except Exception:
+    except Exception as e:
+        logger.debug("Ошибка при извлечении модальности: %s", e)
         pass
 
     return "UNKNOWN"

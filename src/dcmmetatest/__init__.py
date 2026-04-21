@@ -14,6 +14,9 @@ from .detectors import (
     LABEL_SERIES_KEYWORDS,
     LABEL_SOP_CLASS_UIDS,
     detect_label_from_dataset,
+    extract_modality,
+    is_dicom_file,
+    is_label_json,
 )
 from .io import (
     find_dicom_studies_by_dir,
@@ -34,7 +37,6 @@ from .models import (
 from .utils import (
     check_dicom_anonymization,
     configure_logging,
-    extract_modality,
     prompt_choice,
     prompt_with_default,
     prompt_yes_no,
