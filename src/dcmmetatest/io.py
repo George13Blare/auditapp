@@ -281,7 +281,8 @@ def process_study_dir(
                 age_value = None
                 if age_str:
                     import re
-                    match = re.search(r'(\d+)', age_str)
+
+                    match = re.search(r"(\d+)", age_str)
                     if match:
                         age_value = int(match.group(1))
 
