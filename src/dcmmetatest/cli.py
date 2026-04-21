@@ -153,12 +153,12 @@ def create_parser() -> argparse.ArgumentParser:
     return parser
 
 
-def interactive_setup() -> WorkerConfig:
+def interactive_setup() -> tuple[WorkerConfig, str, str, str]:
     """
     Запускает интерактивный режим настройки.
 
     Returns:
-        Настроенная конфигурация воркера
+        Кортеж (конфигурация, путь_ввода, формат_отчёта, путь_вывода)
     """
     print("\n=== Интерактивный режим настройки ===")
     print("Ответьте на несколько вопросов, чтобы выбрать нужный функционал.\n")
@@ -234,23 +234,19 @@ def interactive_setup() -> WorkerConfig:
 
     print("\nНастройка завершена. Запускаем анализ...\n")
 
-    return (
-        WorkerConfig(
-            group_by=group_by,
-            only_labeled=only_labeled,
-            only_non_anon=only_non_anon,
-            modality_filter=modality_filter,
-            max_workers=max_workers,
-            pool_type=pool_type,
-            follow_symlinks=follow_symlinks,
-            max_depth=max_depth,
-            list_empty=list_empty,
-            show_progress=show_progress,
-        ),
-        input_path,
-        report_format,
-        output_path,
-    )  # type: ignore
+    config = WorkerConfig(
+        group_by=group_by,
+        only_labeled=only_labeled,
+        only_non_anon=only_non_anon,
+        modality_filter=modality_filter,
+        max_workers=max_workers,
+        pool_type=pool_type,
+        follow_symlinks=follow_symlinks,
+        max_depth=max_depth,
+        list_empty=list_empty,
+        show_progress=show_progress,
+    )
+    return config, input_path, report_format, output_path
 
 
 def main(argv: list[str] | None = None) -> int:

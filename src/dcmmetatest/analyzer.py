@@ -75,14 +75,14 @@ def run_analysis(
 
         max_workers = os.cpu_count() or 4
 
-    ExecutorClass = ProcessPoolExecutor if config.pool_type == "process" else ThreadPoolExecutor
+    executor_class = ProcessPoolExecutor if config.pool_type == "process" else ThreadPoolExecutor
 
     results: list[StudyResult] = []
 
     if config.show_progress and HAS_TQDM:
         tqdm(study_items, desc="Обработка исследований")
 
-    with ExecutorClass(max_workers=max_workers) as executor:
+    with executor_class(max_workers=max_workers) as executor:
         futures = {}
 
         for key, value in study_items:

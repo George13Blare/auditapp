@@ -481,9 +481,10 @@ def load_config_file(path: str) -> dict[str, Any]:
         if suffix in {".yaml", ".yml"}:
             if not HAS_YAML:
                 raise ImportError("Для загрузки YAML требуется пакет PyYAML")
-            return yaml.safe_load(f) or {}
+            result = yaml.safe_load(f)
+            return result if isinstance(result, dict) else {}
         elif suffix == ".json":
-            return json.load(f)
+            return json.load(f)  # type: ignore[no-any-return]
         else:
             raise ValueError(f"Неподдерживаемый формат конфигурации: {suffix}")
 
