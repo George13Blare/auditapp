@@ -19,9 +19,11 @@ import streamlit as st
 from src.dcmmetatest.ui import (
     cached_run_analysis,
     convert_report_to_dataframe,
+    create_age_distribution_chart,
     create_label_source_bar_chart,
     create_modality_pie_chart,
     create_quality_metrics_cards,
+    create_study_date_timeline,
     validate_folder_path,
 )
 
@@ -269,7 +271,7 @@ if analyze_button:
     # Карточки метрик
     metrics = create_quality_metrics_cards(report)
 
-    col1, col2, col3, col4 = st.columns(4)
+    col1, col2, col3, col4, col5 = st.columns(5)
 
     with col1:
         st.metric("📊 Исследований", metrics["total_studies"])
@@ -287,15 +289,19 @@ if analyze_button:
         st.metric("📂 Пустых папок", metrics["empty_folders"])
         st.metric("❌ Ошибок", metrics["errors_count"])
 
+    with col5:
+        st.metric("🔍 Неанон. файлов", metrics["non_anon_files_total"])
+        st.metric("⚡ Проблем качества", metrics["quality_issues_total"])
+
     st.divider()
 
-    # Вкладки с добавлением редактора структуры
-    tab1, tab2, tab3, tab4, tab5 = st.tabs(["📈 Графики", "📋 Таблица данных", "⚠️ Проблемы", "📄 Экспорт", "🗂️ Редактор структуры"])
+    # Вкладки с добавлением редактора структуры и анонимизатора
+    tab1, tab2, tab3, tab4, tab5, tab6 = st.tabs(["📈 Графики", "📋 Таблица данных", "⚠️ Проблемы", "📄 Экспорт", "🗂️ Редактор структуры", "🔐 Анонимизатор"])
 
     with tab1:
         st.subheader("Визуализация данных")
 
-        col_chart1, col_chart2 = st.columns(2)
+        col_chart1, col_chart2, col_chart3 = st.columns(3)
 
         with col_chart1:
             fig_modality = create_modality_pie_chart(report)
@@ -304,6 +310,19 @@ if analyze_button:
         with col_chart2:
             fig_labels = create_label_source_bar_chart(report)
             st.plotly_chart(fig_labels, use_container_width=True)
+
+        with col_chart3:
+            fig_timeline = create_study_date_timeline(report)
+            if fig_timeline:
+                st.plotly_chart(fig_timeline, use_container_width=True)
+
+        # Дополнительный ряд графиков
+        col_chart4, col_chart5 = st.columns(2)
+
+        with col_chart4:
+            fig_age = create_age_distribution_chart(report)
+            if fig_age:
+                st.plotly_chart(fig_age, use_container_width=True)
 
     with tab2:
         st.subheader("Детальные данные по исследованиям")
@@ -550,6 +569,111 @@ if analyze_button:
                 render_tree(st.session_state.dataset_structure)
             else:
                 st.warning("Не удалось сканировать структуру датасета")
+        else:
+            st.info("Сначала запустите анализ датасета")
+
+    # Вкладка анонимизатора DICOM
+    with tab6:
+        st.subheader("🔐 Анонимизатор DICOM-данных")
+        st.markdown("""
+        Инструмент для безопасной анонимизации DICOM-файлов с сохранением целостности исследований.
+        
+        **Возможности:**
+        - Удаление персональных данных пациентов (PatientName, PatientID, даты и т.д.)
+        - Псевдоанонимизация с сохранением возможности связывания данных
+        - Сохранение маппинга оригинальных и анонимизированных значений
+        - Гибкая настройка уровня анонимизации
+        
+        **Уровни анонимизации:**
+        - **Basic**: Базовая анонимизация по стандарту DICOM PS3.15
+        - **Full**: Полная анонимизация всех идентифицирующих полей
+        """)
+        
+        if st.session_state.selected_folder_path:
+            from src.dcmmetatest.anonymizer import AnonymizationConfig, run_anonymization
+            
+            st.markdown("### Настройки анонимизации")
+            
+            col_anon1, col_anon2 = st.columns(2)
+            
+            with col_anon1:
+                anon_level = st.selectbox(
+                    "Уровень анонимизации",
+                    options=["basic", "full"],
+                    index=0,
+                    help="Выберите уровень анонимизации"
+                )
+                
+                preserve_uids = st.checkbox(
+                    "Сохранить UID для целостности",
+                    value=True,
+                    help="Сохраняет StudyInstanceUID и SeriesInstanceUID для связи файлов"
+                )
+                
+                create_mapping = st.checkbox(
+                    "Создать файл маппинга",
+                    value=True,
+                    help="Создаёт JSON файл с соответствием оригинальных и анонимизированных значений"
+                )
+            
+            with col_anon2:
+                output_dir = st.text_input(
+                    "Выходная директория",
+                    placeholder="/path/to/anonymized/output",
+                    help="Путь для сохранения анонимизированных данных"
+                )
+                
+                dry_run = st.checkbox(
+                    "Тестовый режим (без записи)",
+                    value=False,
+                    help="Запуск без фактической записи файлов"
+                )
+            
+            if st.button("🚀 Запустить анонимизацию", type="primary"):
+                if not output_dir and not dry_run:
+                    st.error("Укажите выходную директорию или включите тестовый режим")
+                else:
+                    config = AnonymizationConfig(
+                        level=anon_level,
+                        preserve_study_integrity=preserve_uids,
+                        create_mapping_file=create_mapping,
+                        output_dir=output_dir if output_dir else None,
+                        dry_run=dry_run,
+                    )
+                    
+                    try:
+                        with st.spinner("Анонимизация..."):
+                            stats, mapping = run_anonymization(
+                                st.session_state.selected_folder_path,
+                                output_dir if output_dir else "/tmp/anonymized",
+                                config,
+                            )
+                        
+                        st.success(f"✅ Анонимизация завершена!")
+                        
+                        col_stat1, col_stat2, col_stat3 = st.columns(3)
+                        
+                        with col_stat1:
+                            st.metric("Всего файлов", stats.total_files)
+                        with col_stat2:
+                            st.metric("Обработано", stats.processed_files)
+                        with col_stat3:
+                            st.metric("Ошибок", stats.failed_files)
+                        
+                        if stats.tags_modified:
+                            st.markdown("### Изменённые теги:")
+                            st.json(stats.tags_modified)
+                        
+                        if create_mapping and not dry_run and mapping:
+                            st.download_button(
+                                label="📥 Скачать файл маппинга",
+                                data=json.dumps(mapping, indent=2, ensure_ascii=False),
+                                file_name="anonymization_mapping.json",
+                                mime="application/json",
+                            )
+                            
+                    except Exception as e:
+                        st.error(f"❌ Ошибка анонимизации: {e!s}")
         else:
             st.info("Сначала запустите анализ датасета")
 

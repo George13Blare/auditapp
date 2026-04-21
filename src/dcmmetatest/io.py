@@ -224,6 +224,7 @@ def process_study_dir(
         Результат анализа исследования
     """
     non_anon_patients: set[str] = set()
+    non_anon_files: list[str] = []
     patient_ids: set[str] = set()
     errors: list[str] = []
     modalities: list[str] = []
@@ -231,6 +232,9 @@ def process_study_dir(
     series_raw: dict[str, dict[str, str | set[str] | int]] = {}
     file_count = 0
     has_label = False
+    age_groups: set[str] = set()
+    quality_issues: dict[str, int] = {}
+    study_date: str = ""
 
     dicom_files: list[Path] = []
     try:
@@ -257,7 +261,46 @@ def process_study_dir(
             # Проверка анонимности
             is_anon, _, pn_info = check_dicom_anonymization(str(f))
             if not is_anon and pn_info:
-                non_anon_patients.add(pn_info.replace("PatientName: '", "").rstrip("'"))
+                patient_name = pn_info.replace("PatientName: '", "").rstrip("'")
+                non_anon_patients.add(patient_name)
+                file_rel_path = f.relative_to(Path(study_path)) if Path(study_path) in f.parents else Path(f)
+                non_anon_files.append(str(file_rel_path))
+
+            # Сбор StudyDate для аналитики
+            study_date_tag = ds.get((0x0008, 0x0020), None)
+            if study_date_tag and study_date_tag.value:
+                study_date_val = str(study_date_tag.value).strip()
+                if study_date_val and not study_date:
+                    study_date = study_date_val[:8] if len(study_date_val) >= 8 else study_date_val
+
+            # Сбор PatientAge для аналитики
+            patient_age_tag = ds.get((0x0010, 0x1010), None)
+            if patient_age_tag and patient_age_tag.value:
+                age_str = str(patient_age_tag.value).strip()
+                # Извлечение возраста (может быть в формате "045Y" или просто "45")
+                age_value = None
+                if age_str:
+                    import re
+
+                    match = re.search(r"(\d+)", age_str)
+                    if match:
+                        age_value = int(match.group(1))
+
+                if age_value is not None:
+                    # Группировка по возрастным категориям
+                    if age_value < 18:
+                        age_group = "0-17"
+                    elif age_value < 30:
+                        age_group = "18-29"
+                    elif age_value < 45:
+                        age_group = "30-44"
+                    elif age_value < 60:
+                        age_group = "45-59"
+                    elif age_value < 75:
+                        age_group = "60-74"
+                    else:
+                        age_group = "75+"
+                    age_groups.add(age_group)
 
             # Детекция разметки
             detect_label_from_dataset(ds, label_sources)
@@ -284,6 +327,7 @@ def process_study_dir(
 
         except Exception as e:
             errors.append(f"{f}: {e!s}")
+            quality_issues["read_errors"] = quality_issues.get("read_errors", 0) + 1
 
     # Дополнительные признаки разметки
     label_files = list(Path(study_path).rglob("*.seg.nrrd"))
@@ -333,6 +377,7 @@ def process_study_dir(
         study_key=study_path,
         has_label=has_label,
         non_anon_patients=sorted(non_anon_patients),
+        non_anon_files=non_anon_files[:10],  # Ограничим количество файлов для производительности
         modalities=modalities,
         errors=errors,
         study_path_rep=study_path,
@@ -340,6 +385,7 @@ def process_study_dir(
         series=series_serializable,
         file_count=file_count,
         patient_ids=sorted(patient_ids),
+        study_date=study_date,
     )
 
 
