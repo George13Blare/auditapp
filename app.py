@@ -10,8 +10,6 @@ Streamlit приложение для визуального анализа DICO
 """
 
 import logging
-import os
-import shutil
 from pathlib import Path
 
 import streamlit as st
@@ -56,6 +54,12 @@ if "dataset_structure" not in st.session_state:
     st.session_state.dataset_structure = None
 if "selected_folder_path" not in st.session_state:
     st.session_state.selected_folder_path = None
+if "analysis_history" not in st.session_state:
+    st.session_state.analysis_history = []  # История анализов
+if "structure_templates" not in st.session_state:
+    st.session_state.structure_templates = {}  # Шаблоны структуры
+if "current_report" not in st.session_state:
+    st.session_state.current_report = None  # Текущий отчёт для доступа из других вкладок
 
 # Боковая панель
 st.sidebar.header("⚙️ Настройки анализа")
@@ -101,18 +105,20 @@ modality_filter = st.sidebar.multiselect(
 # Кнопка запуска анализа
 analyze_button = st.sidebar.button("🚀 Запустить анализ", type="primary", disabled=not folder_path)
 
+
 # Функция для сканирования структуры датасета
 def scan_dataset_structure(path: str, max_depth: int = 3) -> dict:
     """Сканирует структуру датасета и возвращает её в виде дерева."""
+
     def scan_dir(dir_path: Path, current_depth: int) -> dict | None:
         if current_depth > max_depth:
             return None
-        
+
         try:
             items = sorted(dir_path.iterdir(), key=lambda x: (x.is_file(), x.name.lower()))
         except PermissionError:
             return {"name": dir_path.name, "type": "dir", "error": "Нет доступа", "children": []}
-        
+
         children = []
         for item in items[:50]:  # Ограничиваем количество элементов для производительности
             if item.is_dir():
@@ -120,12 +126,14 @@ def scan_dataset_structure(path: str, max_depth: int = 3) -> dict:
                 if child:
                     children.append(child)
             else:
-                children.append({
-                    "name": item.name,
-                    "type": "file",
-                    "size": item.stat().st_size,
-                })
-        
+                children.append(
+                    {
+                        "name": item.name,
+                        "type": "file",
+                        "size": item.stat().st_size,
+                    }
+                )
+
         return {
             "name": dir_path.name,
             "type": "dir",
@@ -133,12 +141,13 @@ def scan_dataset_structure(path: str, max_depth: int = 3) -> dict:
             "children": children,
             "total_items": len(items),
         }
-    
+
     root_path = Path(path)
     if not root_path.exists():
         return None
-    
+
     return scan_dir(root_path, 0)
+
 
 # Функция для удаления файла/папки
 def delete_item(item_path: str) -> tuple[bool, str]:
@@ -146,7 +155,7 @@ def delete_item(item_path: str) -> tuple[bool, str]:
     path = Path(item_path)
     if not path.exists():
         return False, "Файл/папка не существует"
-    
+
     try:
         if path.is_file():
             path.unlink()
@@ -158,8 +167,9 @@ def delete_item(item_path: str) -> tuple[bool, str]:
             return True, f"Папка удалена: {item_path}"
     except Exception as e:
         return False, f"Ошибка удаления: {e!s}"
-    
+
     return False, "Неизвестная ошибка"
+
 
 # Функция для переименования файла/папки
 def rename_item(old_path: str, new_name: str) -> tuple[bool, str]:
@@ -167,16 +177,17 @@ def rename_item(old_path: str, new_name: str) -> tuple[bool, str]:
     old = Path(old_path)
     if not old.exists():
         return False, "Файл/папка не существует"
-    
+
     new = old.parent / new_name
     if new.exists():
         return False, "Файл/папка с таким именем уже существует"
-    
+
     try:
         old.rename(new)
         return True, f"Переименовано в: {new_name}"
     except Exception as e:
         return False, f"Ошибка переименования: {e!s}"
+
 
 # Зона прогресс бара (отдельная выделенная область)
 progress_container = st.container()
@@ -217,19 +228,18 @@ if analyze_button:
         progress_bar = st.progress(0)
         progress_text = st.empty()
         progress_status = st.empty()
-        
+
         # Имитация прогресса (т.к. анализ может быть длительным)
         progress_status.info("🔍 Начато сканирование датасета...")
-        
+
         try:
             # Асинхронный запуск с обновлением прогресса
             import threading
-            import time
-            
+
             analysis_complete = threading.Event()
             analysis_result = {}
             analysis_error = {}
-            
+
             def run_analysis_thread():
                 try:
                     result = cached_run_analysis(valid_path, config_dict)
@@ -238,27 +248,41 @@ if analyze_button:
                     analysis_error["error"] = e
                 finally:
                     analysis_complete.set()
-            
+
             thread = threading.Thread(target=run_analysis_thread)
             thread.start()
-            
+
             # Обновление прогресс бара
             progress_value = 0
             while not analysis_complete.wait(timeout=0.5):
                 progress_value = min(progress_value + 5, 90)
                 progress_bar.progress(progress_value)
                 progress_text.text(f"Обработка... {progress_value}%")
-            
+
             thread.join()
-            
+
             if analysis_error:
                 raise analysis_error["error"]
-            
+
             report = analysis_result["report"]
+            st.session_state.current_report = report  # Сохраняем отчёт для доступа из других вкладок
             progress_bar.progress(100)
             progress_text.text("Анализ завершён!")
             progress_status.success("✅ Анализ успешно завершён")
-            
+
+            # Добавляем в историю анализа
+            import datetime
+
+            history_entry = {
+                "timestamp": datetime.datetime.now().isoformat(),
+                "path": valid_path,
+                "total_studies": len(report.results),
+                "total_files": sum(len(s.files) for s in report.results),
+                "non_anon_count": len(report.non_anon_patients),
+                "config": config_dict.copy(),
+            }
+            st.session_state.analysis_history.append(history_entry)
+
         except Exception as e:
             st.error(f"❌ Ошибка при анализе: {str(e)}")
             logger.exception("Analysis failed")
@@ -295,8 +319,19 @@ if analyze_button:
 
     st.divider()
 
-    # Вкладки с добавлением редактора структуры и анонимизатора
-    tab1, tab2, tab3, tab4, tab5, tab6 = st.tabs(["📈 Графики", "📋 Таблица данных", "⚠️ Проблемы", "📄 Экспорт", "🗂️ Редактор структуры", "🔐 Анонимизатор"])
+    # Вкладки с добавлением редактора структуры, конфигуратора и истории
+    tab1, tab2, tab3, tab4, tab5, tab6, tab7, tab8 = st.tabs(
+        [
+            "📈 Графики",
+            "📋 Таблица данных",
+            "⚠️ Проблемы",
+            "📄 Экспорт",
+            "🗂️ Редактор структуры",
+            "⚙️ Конфигуратор структуры",
+            "🔐 Анонимизатор",
+            "📜 История анализов",
+        ]
+    )
 
     with tab1:
         st.subheader("Визуализация данных")
@@ -445,105 +480,105 @@ if analyze_button:
         st.subheader("🗂️ Редактор структуры датасета")
         st.markdown("""
         Инструмент для просмотра и редактирования структуры вашего DICOM-датасета.
-        
+
         **Возможности:**
         - Просмотр древовидной структуры
         - Переименование файлов и папок
         - Удаление пустых папок и файлов
         """)
-        
+
         if st.session_state.selected_folder_path:
             # Кнопка обновления структуры
             if st.button("🔄 Обновить структуру", key="refresh_structure"):
                 st.session_state.dataset_structure = scan_dataset_structure(st.session_state.selected_folder_path)
                 st.rerun()
-            
+
             # Сканирование структуры если ещё не сделано
             if st.session_state.dataset_structure is None:
                 with st.spinner("Сканирование структуры..."):
                     st.session_state.dataset_structure = scan_dataset_structure(st.session_state.selected_folder_path)
-            
+
             if st.session_state.dataset_structure:
                 # Функция для рекурсивного отображения дерева
                 def render_tree(node, level=0, parent_key=""):
-                    indent = "  " * level
-                    node_key = f"{parent_key}/{node['name']}" if parent_key else node['name']
-                    
-                    if node['type'] == 'dir':
+                    "  " * level
+                    node_key = f"{parent_key}/{node['name']}" if parent_key else node["name"]
+
+                    if node["type"] == "dir":
                         # Отображение папки
                         col_icon, col_name, col_actions = st.columns([0.1, 0.7, 0.2])
-                        
+
                         with col_icon:
                             st.write("📁")
-                        
+
                         with col_name:
                             st.markdown(f"**{node['name']}**")
-                            if 'total_items' in node:
+                            if "total_items" in node:
                                 st.caption(f"Элементов: {node['total_items']}")
-                        
+
                         with col_actions:
                             # Переименование
                             new_name = st.text_input(
                                 "Переименовать",
-                                value=node['name'],
+                                value=node["name"],
                                 key=f"rename_{node_key}",
                                 placeholder="Новое имя",
-                                label_visibility="collapsed"
+                                label_visibility="collapsed",
                             )
                             if st.button("✏️", key=f"btn_rename_{node_key}", help="Переименовать"):
-                                if new_name and new_name != node['name']:
-                                    success, msg = rename_item(node.get('path', ''), new_name)
+                                if new_name and new_name != node["name"]:
+                                    success, msg = rename_item(node.get("path", ""), new_name)
                                     if success:
                                         st.success(msg)
                                         st.session_state.dataset_structure = None  # Сброс кэша
                                         st.rerun()
                                     else:
                                         st.error(msg)
-                            
+
                             # Удаление (только пустые папки)
                             if st.button("🗑️", key=f"btn_delete_{node_key}", help="Удалить пустую папку"):
-                                success, msg = delete_item(node.get('path', ''))
+                                success, msg = delete_item(node.get("path", ""))
                                 if success:
                                     st.success(msg)
                                     st.session_state.dataset_structure = None  # Сброс кэша
                                     st.rerun()
                                 else:
                                     st.error(msg)
-                        
+
                         # Рекурсивный рендеринг дочерних элементов
-                        if 'children' in node and node['children']:
+                        if "children" in node and node["children"]:
                             with st.expander(f"Открыть папку {node['name']}", expanded=(level < 1)):
-                                for child in node['children']:
+                                for child in node["children"]:
                                     render_tree(child, level + 1, node_key)
-                    
+
                     else:
                         # Отображение файла
                         col_icon, col_name, col_size, col_actions = st.columns([0.1, 0.6, 0.15, 0.15])
-                        
+
                         with col_icon:
                             st.write("📄")
-                        
+
                         with col_name:
-                            st.write(node['name'])
-                        
+                            st.write(node["name"])
+
                         with col_size:
-                            size_kb = node.get('size', 0) / 1024
+                            size_kb = node.get("size", 0) / 1024
                             if size_kb < 1024:
                                 st.caption(f"{size_kb:.1f} KB")
                             else:
                                 st.caption(f"{size_kb/1024:.1f} MB")
-                        
+
                         with col_actions:
                             # Переименование файла
                             new_name = st.text_input(
                                 "Имя",
-                                value=node['name'],
+                                value=node["name"],
                                 key=f"rename_{node_key}",
                                 placeholder="Новое имя",
-                                label_visibility="collapsed"
+                                label_visibility="collapsed",
                             )
                             if st.button("✏️", key=f"btn_rename_{node_key}", help="Переименовать"):
-                                if new_name and new_name != node['name']:
+                                if new_name and new_name != node["name"]:
                                     # Для файлов нужен путь
                                     file_path = str(Path(st.session_state.selected_folder_path) / node_key)
                                     success, msg = rename_item(file_path, new_name)
@@ -553,7 +588,7 @@ if analyze_button:
                                         st.rerun()
                                     else:
                                         st.error(msg)
-                            
+
                             # Удаление файла
                             if st.button("🗑️", key=f"btn_delete_{node_key}", help="Удалить файл"):
                                 file_path = str(Path(st.session_state.selected_folder_path) / node_key)
@@ -564,7 +599,7 @@ if analyze_button:
                                     st.rerun()
                                 else:
                                     st.error(msg)
-                
+
                 # Рендеринг дерева начиная с корня
                 render_tree(st.session_state.dataset_structure)
             else:
@@ -572,63 +607,165 @@ if analyze_button:
         else:
             st.info("Сначала запустите анализ датасета")
 
-    # Вкладка анонимизатора DICOM
+    # Вкладка конфигуратора структуры (редактор шаблонов)
     with tab6:
+        st.subheader("⚙️ Конфигуратор структуры датасета")
+        st.markdown("""
+        Инструмент для создания и управления шаблонами ожидаемой структуры DICOM-датасета.
+
+        **Возможности:**
+        - Создание шаблонов структуры для разных типов исследований
+        - Валидация реального датасета по шаблону
+        - Сохранение и загрузка шаблонов в JSON
+        - Автоматическое выявление отклонений от шаблона
+        """)
+
+        col_tmpl1, col_tmpl2 = st.columns([2, 1])
+
+        with col_tmpl1:
+            # Список существующих шаблонов
+            st.markdown("### 📋 Существующие шаблоны")
+            if st.session_state.structure_templates:
+                for template_name in st.session_state.structure_templates.keys():
+                    st.write(f"📁 {template_name}")
+            else:
+                st.info("Нет сохранённых шаблонов")
+
+            st.divider()
+
+            # Создание нового шаблона
+            st.markdown("### ➕ Создать новый шаблон")
+            new_template_name = st.text_input("Название шаблона", placeholder="например: CT_Chest_Standard")
+
+            template_structure = st.text_area(
+                "Структура шаблона (JSON формат)",
+                value="""{
+  "root": {
+    "patient_level": {
+      "study_level": {
+        "series_level": ["*.dcm"]
+      }
+    }
+  }
+}""",
+                height=200,
+                help="Опишите ожидаемую структуру в формате JSON",
+            )
+
+            if st.button("💾 Сохранить шаблон"):
+                if new_template_name and template_structure:
+                    try:
+                        import json
+
+                        parsed_template = json.loads(template_structure)
+                        st.session_state.structure_templates[new_template_name] = parsed_template
+                        st.success(f"Шаблон '{new_template_name}' сохранён!")
+                    except json.JSONDecodeError as e:
+                        st.error(f"Ошибка JSON: {e}")
+                else:
+                    st.warning("Заполните название и структуру шаблона")
+
+        with col_tmpl2:
+            # Валидация по шаблону
+            st.markdown("### ✅ Валидация датасета")
+            if st.session_state.structure_templates:
+                selected_template = st.selectbox(
+                    "Выберите шаблон", options=list(st.session_state.structure_templates.keys())
+                )
+
+                if st.button("🔍 Проверить соответствие"):
+                    if st.session_state.current_report and st.session_state.selected_folder_path:
+                        st.info("Функция валидации в разработке...")
+                        # Здесь будет логика валидации
+                    else:
+                        st.warning("Сначала запустите анализ датасета")
+            else:
+                st.info("Сначала создайте шаблон")
+
+            st.divider()
+
+            # Экспорт/импорт шаблонов
+            st.markdown("### 📤 Экспорт/Импорт")
+            if st.session_state.structure_templates:
+                if st.button("📥 Скачать все шаблоны"):
+                    import json
+
+                    templates_json = json.dumps(st.session_state.structure_templates, indent=2, ensure_ascii=False)
+                    st.download_button(
+                        label="💾 Скачать JSON",
+                        data=templates_json,
+                        file_name="structure_templates.json",
+                        mime="application/json",
+                    )
+
+            uploaded_templates = st.file_uploader(
+                "📤 Загрузить шаблоны", type=["json"], help="Загрузите ранее сохранённые шаблоны"
+            )
+            if uploaded_templates:
+                try:
+                    import json
+
+                    loaded = json.load(uploaded_templates)
+                    if isinstance(loaded, dict):
+                        st.session_state.structure_templates.update(loaded)
+                        st.success(f"Загружено шаблонов: {len(loaded)}")
+                    else:
+                        st.error("Неверный формат JSON")
+                except Exception as e:
+                    st.error(f"Ошибка загрузки: {e}")
+
+    # Вкладка анонимизатора DICOM
+    with tab7:
         st.subheader("🔐 Анонимизатор DICOM-данных")
         st.markdown("""
         Инструмент для безопасной анонимизации DICOM-файлов с сохранением целостности исследований.
-        
+
         **Возможности:**
         - Удаление персональных данных пациентов (PatientName, PatientID, даты и т.д.)
         - Псевдоанонимизация с сохранением возможности связывания данных
         - Сохранение маппинга оригинальных и анонимизированных значений
         - Гибкая настройка уровня анонимизации
-        
+
         **Уровни анонимизации:**
         - **Basic**: Базовая анонимизация по стандарту DICOM PS3.15
         - **Full**: Полная анонимизация всех идентифицирующих полей
         """)
-        
+
         if st.session_state.selected_folder_path:
             from src.dcmmetatest.anonymizer import AnonymizationConfig, run_anonymization
-            
+
             st.markdown("### Настройки анонимизации")
-            
+
             col_anon1, col_anon2 = st.columns(2)
-            
+
             with col_anon1:
                 anon_level = st.selectbox(
-                    "Уровень анонимизации",
-                    options=["basic", "full"],
-                    index=0,
-                    help="Выберите уровень анонимизации"
+                    "Уровень анонимизации", options=["basic", "full"], index=0, help="Выберите уровень анонимизации"
                 )
-                
+
                 preserve_uids = st.checkbox(
                     "Сохранить UID для целостности",
                     value=True,
-                    help="Сохраняет StudyInstanceUID и SeriesInstanceUID для связи файлов"
+                    help="Сохраняет StudyInstanceUID и SeriesInstanceUID для связи файлов",
                 )
-                
+
                 create_mapping = st.checkbox(
                     "Создать файл маппинга",
                     value=True,
-                    help="Создаёт JSON файл с соответствием оригинальных и анонимизированных значений"
+                    help="Создаёт JSON файл с соответствием оригинальных и анонимизированных значений",
                 )
-            
+
             with col_anon2:
                 output_dir = st.text_input(
                     "Выходная директория",
                     placeholder="/path/to/anonymized/output",
-                    help="Путь для сохранения анонимизированных данных"
+                    help="Путь для сохранения анонимизированных данных",
                 )
-                
+
                 dry_run = st.checkbox(
-                    "Тестовый режим (без записи)",
-                    value=False,
-                    help="Запуск без фактической записи файлов"
+                    "Тестовый режим (без записи)", value=False, help="Запуск без фактической записи файлов"
                 )
-            
+
             if st.button("🚀 Запустить анонимизацию", type="primary"):
                 if not output_dir and not dry_run:
                     st.error("Укажите выходную директорию или включите тестовый режим")
@@ -640,7 +777,7 @@ if analyze_button:
                         output_dir=output_dir if output_dir else None,
                         dry_run=dry_run,
                     )
-                    
+
                     try:
                         with st.spinner("Анонимизация..."):
                             stats, mapping = run_anonymization(
@@ -648,22 +785,22 @@ if analyze_button:
                                 output_dir if output_dir else "/tmp/anonymized",
                                 config,
                             )
-                        
-                        st.success(f"✅ Анонимизация завершена!")
-                        
+
+                        st.success("✅ Анонимизация завершена!")
+
                         col_stat1, col_stat2, col_stat3 = st.columns(3)
-                        
+
                         with col_stat1:
                             st.metric("Всего файлов", stats.total_files)
                         with col_stat2:
                             st.metric("Обработано", stats.processed_files)
                         with col_stat3:
                             st.metric("Ошибок", stats.failed_files)
-                        
+
                         if stats.tags_modified:
                             st.markdown("### Изменённые теги:")
                             st.json(stats.tags_modified)
-                        
+
                         if create_mapping and not dry_run and mapping:
                             st.download_button(
                                 label="📥 Скачать файл маппинга",
@@ -671,11 +808,92 @@ if analyze_button:
                                 file_name="anonymization_mapping.json",
                                 mime="application/json",
                             )
-                            
+
                     except Exception as e:
                         st.error(f"❌ Ошибка анонимизации: {e!s}")
         else:
             st.info("Сначала запустите анализ датасета")
+
+    # Вкладка истории анализов
+    with tab8:
+        st.subheader("📜 История анализов")
+        st.markdown("""
+        Журнал всех выполненных анализов датасетов в текущей сессии.
+
+        **Информация в истории:**
+        - Время выполнения анализа
+        - Путь к датасету
+        - Количество исследований и файлов
+        - Количество неанонимизированных пациентов
+        - Использованная конфигурация
+        """)
+
+        if st.session_state.analysis_history:
+            # Отображение истории в виде таблицы
+            history_data = []
+            for idx, entry in enumerate(st.session_state.analysis_history, 1):
+                history_data.append(
+                    {
+                        "№": idx,
+                        "Время": entry["timestamp"][:19].replace("T", " "),
+                        "Путь": entry["path"],
+                        "Исследований": entry["total_studies"],
+                        "Файлов": entry["total_files"],
+                        "Неанон. пациентов": entry["non_anon_count"],
+                    }
+                )
+
+            import pandas as pd
+
+            history_df = pd.DataFrame(history_data)
+
+            st.dataframe(
+                history_df,
+                use_container_width=True,
+                hide_index=True,
+                height=400,
+            )
+
+            st.divider()
+
+            # Детали выбранного анализа
+            st.markdown("### 📋 Детали анализа")
+            selected_idx = st.selectbox(
+                "Выберите анализ из истории",
+                options=list(range(1, len(st.session_state.analysis_history) + 1)),
+                format_func=lambda x: f"Анализ #{x} - {st.session_state.analysis_history[x-1]['path']}",
+            )
+
+            if selected_idx:
+                selected_entry = st.session_state.analysis_history[selected_idx - 1]
+
+                col_det1, col_det2 = st.columns(2)
+
+                with col_det1:
+                    st.markdown("**Параметры:**")
+                    st.write(f"- **Время:** {selected_entry['timestamp'][:19].replace('T', ' ')}")
+                    st.write(f"- **Путь:** `{selected_entry['path']}`")
+                    st.write(f"- **Исследований:** {selected_entry['total_studies']}")
+                    st.write(f"- **Файлов:** {selected_entry['total_files']}")
+                    st.write(f"- **Неанонимизировано:** {selected_entry['non_anon_count']} пациентов")
+
+                with col_det2:
+                    st.markdown("**Конфигурация:**")
+                    config = selected_entry.get("config", {})
+                    st.write(f"- Группировка: `{config.get('group_by', 'study')}`")
+                    st.write(f"- Потоков: `{config.get('max_workers', 4)}`")
+                    st.write(f"- Только размеченные: `{config.get('only_labeled', False)}`")
+                    modality = config.get("modality_filter")
+                    st.write(f"- Фильтр модальности: `{modality if modality else 'Все'}`")
+
+            # Кнопка очистки истории
+            st.divider()
+            if st.button("🗑️ Очистить историю", type="secondary"):
+                st.session_state.analysis_history = []
+                st.success("История очищена")
+                st.rerun()
+        else:
+            st.info("История пуста. Запустите анализ датасета.")
 
 else:
     # Стартовая страница
