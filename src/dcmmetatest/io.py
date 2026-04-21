@@ -224,6 +224,7 @@ def process_study_dir(
         Результат анализа исследования
     """
     non_anon_patients: set[str] = set()
+    non_anon_files: list[str] = []
     patient_ids: set[str] = set()
     errors: list[str] = []
     modalities: list[str] = []
@@ -262,14 +263,15 @@ def process_study_dir(
             if not is_anon and pn_info:
                 patient_name = pn_info.replace("PatientName: '", "").rstrip("'")
                 non_anon_patients.add(patient_name)
-                non_anon_files.append(str(f.relative_to(Path(study_path)) if Path(study_path) in Path(f).parents else str(f)))
+                file_rel_path = f.relative_to(Path(study_path)) if Path(study_path) in f.parents else Path(f)
+                non_anon_files.append(str(file_rel_path))
 
             # Сбор StudyDate для аналитики
             study_date_tag = ds.get((0x0008, 0x0020), None)
             if study_date_tag and study_date_tag.value:
-                study_date = str(study_date_tag.value).strip()
-                if study_date and not result.study_date:
-                    result.study_date = study_date[:8] if len(study_date) >= 8 else study_date
+                study_date_val = str(study_date_tag.value).strip()
+                if study_date_val and not study_date:
+                    study_date = study_date_val[:8] if len(study_date_val) >= 8 else study_date_val
 
             # Сбор PatientAge для аналитики
             patient_age_tag = ds.get((0x0010, 0x1010), None)
@@ -282,7 +284,7 @@ def process_study_dir(
                     match = re.search(r'(\d+)', age_str)
                     if match:
                         age_value = int(match.group(1))
-                
+
                 if age_value is not None:
                     # Группировка по возрастным категориям
                     if age_value < 18:

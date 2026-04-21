@@ -5,7 +5,6 @@ from __future__ import annotations
 import hashlib
 import json
 import logging
-import shutil
 from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any
@@ -13,7 +12,6 @@ from typing import Any
 try:
     import pydicom
     from pydicom.dataset import Dataset
-    from pydicom.uid import generate_uid
 
     HAS_PYDICOM = True
 except ImportError:
@@ -537,7 +535,6 @@ def anonymize_dataset(
         tags_to_anonymize = BASIC_ANONYMIZATION_TAGS
 
     patient_id = str(ds.get((0x0010, 0x0020), ""))
-    study_uid = str(ds.get((0x0020, 0x000D), ""))
 
     for tag, tag_name in tags_to_anonymize.items():
         if tag in config.exclude_tags:
