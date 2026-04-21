@@ -320,7 +320,7 @@ if analyze_button:
     st.divider()
 
     # Вкладки с добавлением редактора структуры, конфигуратора и истории
-    tab1, tab2, tab3, tab4, tab5, tab6, tab7, tab8 = st.tabs(
+    tab1, tab2, tab3, tab4, tab5, tab6, tab7, tab8, tab9 = st.tabs(
         [
             "📈 Графики",
             "📋 Таблица данных",
@@ -330,6 +330,7 @@ if analyze_button:
             "⚙️ Конфигуратор структуры",
             "🔐 Анонимизатор",
             "📜 История анализов",
+            "🧪 Бета: Нормализация и сплит",
         ]
     )
 
@@ -980,6 +981,324 @@ if analyze_button:
                 st.rerun()
         else:
             st.info("История пуста. Запустите анализ датасета.")
+
+    # Вкладка бета-функционала: нормализация и сплит
+    with tab9:
+        st.subheader("🧪 Бета: Нормализация и разделение датасетов")
+        st.markdown("""
+        Экспериментальный раздел для нормализации структуры DICOM-датасетов и разделения на train/val/test.
+
+        **Возможности:**
+        - 📁 Нормализация структуры (patient_study_series)
+        - 🔀 Разделение на train/val/test с настройкой пропорций
+        - 🏷️ Извлечение информации о масках сегментации
+        - 📖 Работа со словарями классов
+        
+        ⚠️ **Это бета-версия!** Функционал находится в разработке.
+        """)
+
+        if st.session_state.selected_folder_path:
+            from src.dcmmetatest.normalizer import (
+                NormalizationConfig,
+                SplitConfig,
+                analyze_segmentation_masks,
+                load_class_dictionary,
+                normalize_dataset,
+                save_class_dictionary,
+                split_dataset,
+            )
+
+            # Переключатель между режимами
+            beta_mode = st.radio(
+                "Режим работы",
+                ["Нормализация", "Разделение (Split)", "Анализ сегментаций", "Словарь классов"],
+                horizontal=True,
+            )
+
+            # Режим нормализации
+            if beta_mode == "Нормализация":
+                st.markdown("### 📁 Нормализация структуры датасета")
+                
+                col_norm1, col_norm2 = st.columns(2)
+                
+                with col_norm1:
+                    norm_structure = st.selectbox(
+                        "Целевая структура",
+                        ["patient_study_series", "flat"],
+                        index=0,
+                        help="patient_study_series: patient_X/study_Y/series_Z/, flat: все файлы в одной папке"
+                    )
+                    
+                    rename_files = st.checkbox("Переименовывать файлы", value=True)
+                    file_pattern = st.text_input(
+                        "Шаблон имени файла",
+                        value="{patient}_{study}_{series}_{index}.dcm",
+                        disabled=not rename_files,
+                        help="Доступны переменные: {patient}, {study}, {series}, {index}"
+                    )
+                    
+                    extract_metadata = st.checkbox("Извлекать метаданные", value=True)
+                
+                with col_norm2:
+                    process_segs = st.checkbox("Обрабатывать сегментации", value=True)
+                    seg_output_dir = st.text_input(
+                        "Папка для сегментаций",
+                        value="segmentations",
+                        disabled=not process_segs
+                    )
+                    
+                    output_norm_dir = st.text_input(
+                        "Выходная директория",
+                        placeholder="/path/to/normalized/output",
+                        help="Путь для сохранения нормализованного датасета"
+                    )
+                
+                if st.button("🚀 Запустить нормализацию", type="primary"):
+                    if not output_norm_dir:
+                        st.error("Укажите выходную директорию")
+                    else:
+                        config = NormalizationConfig(
+                            target_structure=norm_structure,
+                            rename_files=rename_files,
+                            file_pattern=file_pattern,
+                            extract_metadata=extract_metadata,
+                            process_segmentations=process_segs,
+                            segmentation_output_dir=seg_output_dir,
+                        )
+                        
+                        try:
+                            with st.spinner("Нормализация..."):
+                                stats = normalize_dataset(
+                                    st.session_state.selected_folder_path,
+                                    output_norm_dir,
+                                    config,
+                                )
+                            
+                            st.success("✅ Нормализация завершена!")
+                            
+                            col_s1, col_s2, col_s3 = st.columns(3)
+                            with col_s1:
+                                st.metric("Пациентов", stats.total_patients)
+                                st.metric("Исследований", stats.total_studies)
+                            with col_s2:
+                                st.metric("Файлов обработано", stats.processed_files)
+                                st.metric("Ошибок", stats.failed_files)
+                            with col_s3:
+                                st.metric("Сегментаций найдено", stats.segmentations_found)
+                            
+                            if stats.output_structure:
+                                st.json(stats.output_structure)
+                                
+                        except Exception as e:
+                            st.error(f"❌ Ошибка нормализации: {e!s}")
+
+            # Режим разделения
+            elif beta_mode == "Разделение (Split)":
+                st.markdown("### 🔀 Разделение на Train / Validation / Test")
+                
+                col_split1, col_split2 = st.columns(2)
+                
+                with col_split1:
+                    st.markdown("**Пропорции разделения:**")
+                    train_ratio = st.slider("Train", 0.1, 0.9, 0.7, 0.05)
+                    val_ratio = st.slider("Validation", 0.05, 0.5, 0.15, 0.05)
+                    test_ratio = round(1.0 - train_ratio - val_ratio, 2)
+                    st.info(f"Test ratio: {test_ratio} (автоматически)")
+                    
+                    seed = st.number_input("Random Seed", value=42, help="Для воспроизводимости")
+                
+                with col_split2:
+                    st.markdown("**Настройки:**")
+                    stratify_by = st.selectbox(
+                        "Стратификация по",
+                        ["patient", "study"],
+                        index=0,
+                        help="patient: всё исследование идёт в один сплит, study: можно разделить"
+                    )
+                    
+                    create_manifest = st.checkbox("Создать манифест", value=True)
+                    
+                    output_split_dir = st.text_input(
+                        "Выходная директория",
+                        placeholder="/path/to/split/output",
+                        help="Будут созданы папки: train/, val/, test/"
+                    )
+                
+                if st.button("🚀 Запустить разделение", type="primary"):
+                    if not output_split_dir:
+                        st.error("Укажите выходную директорию")
+                    elif test_ratio <= 0:
+                        st.error("Некорректные пропорции: test ratio должен быть > 0")
+                    else:
+                        config = SplitConfig(
+                            train_ratio=train_ratio,
+                            val_ratio=val_ratio,
+                            test_ratio=test_ratio,
+                            stratify_by=stratify_by,
+                            seed=seed,
+                            create_manifest=create_manifest,
+                        )
+                        
+                        try:
+                            with st.spinner("Разделение датасета..."):
+                                stats = split_dataset(
+                                    st.session_state.selected_folder_path,
+                                    output_split_dir,
+                                    config,
+                                )
+                            
+                            st.success("✅ Разделение завершено!")
+                            
+                            col_sp1, col_sp2, col_sp3 = st.columns(3)
+                            with col_sp1:
+                                st.metric("Train", f"{stats.train_samples} образцов\n{stats.train_patients} пациентов")
+                            with col_sp2:
+                                st.metric("Validation", f"{stats.val_samples} образцов\n{stats.val_patients} пациентов")
+                            with col_sp3:
+                                st.metric("Test", f"{stats.test_samples} образцов\n{stats.test_patients} пациентов")
+                            
+                            if stats.split_manifest:
+                                with st.expander("📄 Посмотреть манифест"):
+                                    st.json(stats.split_manifest)
+                                
+                        except Exception as e:
+                            st.error(f"❌ Ошибка разделения: {e!s}")
+
+            # Режим анализа сегментаций
+            elif beta_mode == "Анализ сегментаций":
+                st.markdown("### 🏷️ Анализ масок сегментации")
+                
+                if st.button("🔍 Сканировать маски сегментации"):
+                    try:
+                        with st.spinner("Анализ..."):
+                            seg_info = analyze_segmentation_masks(st.session_state.selected_folder_path)
+                        
+                        if seg_info['total_masks'] > 0:
+                            st.success(f"Найдено масок: {seg_info['total_masks']}")
+                            
+                            col_seg1, col_seg2 = st.columns(2)
+                            with col_seg1:
+                                st.metric("Уникальных классов", seg_info['total_classes'])
+                            with col_seg2:
+                                st.metric("Масок", seg_info['total_masks'])
+                            
+                            if seg_info['unique_classes']:
+                                st.markdown("**Классы:**")
+                                st.write(", ".join(seg_info['unique_classes']))
+                            
+                            if seg_info['masks']:
+                                with st.expander("📋 Детали по маскам"):
+                                    for mask in seg_info['masks']:
+                                        st.markdown(f"**{mask['name']}**")
+                                        st.code(f"Файл: {mask['file']}")
+                                        if mask['classes']:
+                                            st.write("Классы:")
+                                            for cls in mask['classes']:
+                                                st.write(f"- ID {cls['id']}: {cls['name']} ({cls['description']})")
+                                        st.divider()
+                        else:
+                            st.info("Маски сегментации не найдены")
+                            
+                    except Exception as e:
+                        st.error(f"❌ Ошибка анализа: {e!s}")
+
+            # Режим словаря классов
+            elif beta_mode == "Словарь классов":
+                st.markdown("### 📖 Словарь классов сегментации")
+                
+                dict_tab1, dict_tab2 = st.tabs(["Загрузка", "Создание/Редактирование"])
+                
+                with dict_tab1:
+                    st.markdown("**Загрузить существующий словарь**")
+                    
+                    uploaded_dict = st.file_uploader(
+                        "JSON файл со словарём",
+                        type=["json"],
+                        help='Формат: {"classes": [{"id": 1, "name": "...", ...}]}'
+                    )
+                    
+                    if uploaded_dict:
+                        try:
+                            import json
+                            data = json.load(uploaded_dict)
+                            st.session_state.class_dictionary = data
+                            st.success(f"Загружено классов: {len(data.get('classes', []))}")
+                            
+                            if 'classes' in data:
+                                st.markdown("**Классы:**")
+                                for cls in data['classes']:
+                                    st.write(f"- ID {cls.get('id')}: **{cls.get('name')}** - {cls.get('description', '')}")
+                        except Exception as e:
+                            st.error(f"Ошибка загрузки: {e}")
+                
+                with dict_tab2:
+                    st.markdown("**Создать новый словарь классов**")
+                    
+                    if 'class_dictionary' not in st.session_state:
+                        st.session_state.class_dictionary = {'classes': []}
+                    
+                    # Добавление класса
+                    st.markdown("➕ Добавить класс")
+                    col_c1, col_c2, col_c3, col_c4 = st.columns(4)
+                    
+                    with col_c1:
+                        new_class_id = st.number_input("ID", min_value=1, value=1, key="new_cls_id")
+                    with col_c2:
+                        new_class_name = st.text_input("Название", value="", key="new_cls_name")
+                    with col_c3:
+                        new_class_desc = st.text_input("Описание", value="", key="new_cls_desc")
+                    with col_c4:
+                        new_class_color = st.color_picker("Цвет", "#FF0000", key="new_cls_color")
+                    
+                    if st.button("Добавить класс"):
+                        if new_class_name:
+                            hex_color = new_class_color.lstrip('#')
+                            rgb_color = tuple(int(hex_color[i:i+2], 16) for i in (0, 2, 4))
+                            
+                            st.session_state.class_dictionary['classes'].append({
+                                'id': new_class_id,
+                                'name': new_class_name,
+                                'description': new_class_desc,
+                                'color': list(rgb_color),
+                            })
+                            st.success(f"Добавлен класс: {new_class_name}")
+                            st.rerun()
+                    
+                    # Отображение текущих классов
+                    if st.session_state.class_dictionary.get('classes'):
+                        st.markdown("**Текущие классы:**")
+                        for idx, cls in enumerate(st.session_state.class_dictionary['classes']):
+                            with st.container():
+                                col_d1, col_d2, col_d3, col_d4, col_d5 = st.columns([1, 2, 3, 1, 1])
+                                with col_d1:
+                                    st.write(f"ID: {cls.get('id')}")
+                                with col_d2:
+                                    color_preview = f"#{''.join(f'{c:02x}' for c in cls.get('color', [0,0,0]))}"
+                                    st.write(f"{cls.get('name')} `{color_preview}`")
+                                with col_d3:
+                                    st.caption(cls.get('description', ''))
+                                with col_d4:
+                                    if st.button("✏️", key=f"edit_cls_{idx}"):
+                                        pass  # TODO: редактирование
+                                with col_d5:
+                                    if st.button("🗑️", key=f"del_cls_{idx}"):
+                                        st.session_state.class_dictionary['classes'].pop(idx)
+                                        st.rerun()
+                                st.divider()
+                    
+                    # Сохранение словаря
+                    if st.session_state.class_dictionary.get('classes'):
+                        dict_json = json.dumps(st.session_state.class_dictionary, indent=2, ensure_ascii=False)
+                        
+                        st.download_button(
+                            label="💾 Скачать словарь (JSON)",
+                            data=dict_json,
+                            file_name="class_dictionary.json",
+                            mime="application/json",
+                        )
+
+        else:
+            st.info("Сначала запустите анализ датасета")
 
 else:
     # Стартовая страница
