@@ -619,8 +619,9 @@ def anonymize_study(
     if not study_path.exists():
         return False, f"Исследование не найдено: {study_path}"
 
-    # Создание выходной директории
-    output_path.mkdir(parents=True, exist_ok=True)
+    # Создание выходной директории только если не dry_run
+    if not config.dry_run:
+        output_path.mkdir(parents=True, exist_ok=True)
 
     dicom_files = list(study_path.rglob("*.dcm")) + list(study_path.rglob("*.[dD][iI][cC][oO][mM]"))
     # Также ищем файлы без расширения

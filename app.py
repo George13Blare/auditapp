@@ -675,8 +675,94 @@ if analyze_button:
 
                 if st.button("🔍 Проверить соответствие"):
                     if st.session_state.current_report and st.session_state.selected_folder_path:
-                        st.info("Функция валидации в разработке...")
-                        # Здесь будет логика валидации
+                        # Валидация структуры датасета по шаблону
+                        template = st.session_state.structure_templates[selected_template]
+
+                        def validate_structure_against_template(
+                            actual_structure: dict, template: dict, path_prefix: str = ""
+                        ) -> tuple[list[str], list[str]]:
+                            """Сравнивает реальную структуру с шаблоном.
+
+                            Возвращает списки соответствий и отклонений.
+                            """
+                            matches = []
+                            deviations = []
+
+                            def check_node(actual: dict | None, tmpl_node: dict | list, current_path: str):
+                                if isinstance(tmpl_node, dict):
+                                    if actual is None or not isinstance(actual, dict):
+                                        deviations.append(f"❌ Ожидается папка: {current_path}")
+                                        return
+
+                                    for key, value in tmpl_node.items():
+                                        new_path = f"{current_path}/{key}" if current_path else key
+
+                                        # Поиск соответствия в реальной структуре
+                                        if actual.get("children"):
+                                            found_child = None
+                                            for child in actual["children"]:
+                                                if child.get("name") == key or child.get("type") == "dir":
+                                                    found_child = child
+                                                    break
+
+                                            if found_child:
+                                                check_node(found_child, value, new_path)
+                                            else:
+                                                deviations.append(f"❌ Не найдено: {new_path}")
+                                        else:
+                                            deviations.append(f"❌ Нет дочерних элементов в: {current_path}")
+
+                                elif isinstance(tmpl_node, list):
+                                    # Это уровень файлов (например, ["*.dcm"])
+                                    if actual is None:
+                                        deviations.append(f"❌ Ожидается файл/папка: {current_path}")
+                                        return
+
+                                    # Проверка наличия файлов по маске
+                                    for pattern in tmpl_node:
+                                        if pattern.startswith("*."):
+                                            ext = pattern[1:]  # например ".dcm"
+                                            # Проверяем, есть ли файлы с таким расширением
+                                            if actual.get("children"):
+                                                has_matching = any(
+                                                    c.get("type") == "file"
+                                                    and c.get("name", "").endswith(ext.replace("*.", "."))
+                                                    for c in actual["children"]
+                                                )
+                                                if has_matching:
+                                                    matches.append(f"✅ Найдены файлы {pattern} в {current_path}")
+                                                else:
+                                                    deviations.append(f"⚠️ Не найдены файлы {pattern} в {current_path}")
+                                            else:
+                                                deviations.append(f"❌ Нет файлов в: {current_path}")
+
+                            check_node(actual_structure, template, path_prefix)
+                            return matches, deviations
+
+                        # Сканирование текущей структуры
+                        with st.spinner("🔍 Проверка структуры..."):
+                            actual_structure = scan_dataset_structure(
+                                st.session_state.selected_folder_path, max_depth=5
+                            )
+
+                            if actual_structure:
+                                matches, deviations = validate_structure_against_template(actual_structure, template)
+
+                                if deviations:
+                                    st.error(f"Найдено отклонений: {len(deviations)}")
+                                    for dev in deviations[:20]:
+                                        st.text(dev)
+                                    if len(deviations) > 20:
+                                        st.warning(f"... и ещё {len(deviations) - 20} отклонений")
+                                else:
+                                    st.success("✅ Структура полностью соответствует шаблону!")
+
+                                if matches:
+                                    with st.expander(f"✅ Соответствия ({len(matches)})"):
+                                        for match in matches:
+                                            st.text(match)
+                            else:
+                                st.error("Не удалось просканировать структуру датасета")
                     else:
                         st.warning("Сначала запустите анализ датасета")
             else:
