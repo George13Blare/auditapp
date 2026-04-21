@@ -1,8 +1,40 @@
 # DCM MetaTest Plus
 
-Расширенный анализатор DICOM-датасетов с поддержкой группировки по UID, детекцией разметки и параллельной обработкой.
+Расширенный анализатор DICOM-датасетов с поддержкой группировки по UID, детекцией разметки, параллельной обработкой и **визуальным интерфейсом**.
+
+## 🚀 Быстрый старт
+
+### Установка зависимостей
+
+```bash
+pip install -r requirements.txt
+```
+
+### Запуск CLI
+
+```bash
+python -m src.dcmmetatest.cli /path/to/dataset --output report.txt
+```
+
+### Запуск веб-интерфейса (Streamlit)
+
+```bash
+streamlit run app.py
+```
+
+Или:
+
+```bash
+python -m streamlit run app.py
+```
+
+После запуска откройте браузер по адресу `http://localhost:8501`
+
+---
 
 ## Возможности
+
+### Анализ данных
 
 - **Надёжное определение DICOM**: без строгой привязки к преамбуле "DICM", с fallback через pydicom
 - **Детекция разметки**: поддержка RTSTRUCT, SEG, RTSEGANN, SOP Class UID, SeriesDescription, SegmentSequence
@@ -12,58 +44,88 @@
 - **Авто-детект структуры**: анализ структуры датасета с сохранением схемы (JSON/YAML)
 - **Фильтры**: по modality, только размеченные/неанонимные исследования
 - **Отчёты**: TXT, CSV, JSON форматы
-- **Интерактивный режим**: пошаговая настройка перед запуском
-- **Логирование**: настраиваемый уровень, вывод в файл
 
-## Установка
+### Визуальный интерфейс (Streamlit)
 
-```bash
-pip install -r requirements.txt
-```
+- **📊 Dashboard**: Карточки с ключевыми метриками (исследования, файлы, пациенты, процент разметки)
+- **📈 Графики**: 
+  - Круговая диаграмма распределения модальностей
+  - Столбчатая диаграмма источников разметки
+- **📋 Интерактивная таблица**: 
+  - Полные данные по всем исследованиям
+  - Поиск и фильтрация в реальном времени
+  - Сортировка по любому полю
+- **⚠️ Детектор проблем**: 
+  - Список ошибок обработки
+  - Пустые папки
+  - Неанонимизированные данные
+- **📄 Экспорт**: 
+  - Скачивание отчётов в CSV, JSON, TXT прямо из интерфейса
+  - Мгновенная генерация без повторного анализа
 
-Или для разработки:
-
-```bash
-pip install -e ".[dev]"
-```
+---
 
 ## Использование
 
-### Базовый запуск
+### CLI (Командная строка)
+
+#### Базовый запуск
 
 ```bash
-python dcmmetatest_plus.py /path/to/dataset --output report.txt
+python -m src.dcmmetatest.cli /path/to/dataset --output report.txt
 ```
 
-### Группировка по StudyInstanceUID
+#### Группировка по StudyInstanceUID
 
 ```bash
-python dcmmetatest_plus.py /path/to/dataset --group-by study --executor thread --workers 4
+python -m src.dcmmetatest.cli /path/to/dataset --group-by study --executor thread --workers 4
 ```
 
-### Фильтрация по модальностям
+#### Фильтрация по модальностям
 
 ```bash
-python dcmmetatest_plus.py /path/to/dataset --modality-filter CT MR --only-labeled
+python -m src.dcmmetatest.cli /path/to/dataset --modality-filter CT MR --only-labeled
 ```
 
-### Интерактивный режим
+#### Интерактивный режим
 
 ```bash
-python dcmmetatest_plus.py /path/to/dataset --interactive
+python -m src.dcmmetatest.cli /path/to/dataset --interactive
 ```
 
-### Авто-детект структуры
+#### Авто-детект структуры
 
 ```bash
-python dcmmetatest_plus.py /path/to/dataset --auto-detect-schema --schema-output schema.json
+python -m src.dcmmetatest.cli /path/to/dataset --auto-detect-schema --schema-output schema.json
 ```
 
-### Все опции
+#### Все опции
 
 ```bash
-python dcmmetatest_plus.py --help
+python -m src.dcmmetatest.cli --help
 ```
+
+### Веб-интерфейс
+
+1. Запустите приложение:
+   ```bash
+   streamlit run app.py
+   ```
+
+2. Откройте браузер: `http://localhost:8501`
+
+3. В боковой панели:
+   - Укажите путь к датасету
+   - Настройте параметры (группировка, потоки, фильтры)
+   - Нажмите "🚀 Запустить анализ"
+
+4. Просмотр результатов:
+   - **Вкладка "Графики"**: Визуализация распределения модальностей и источников разметки
+   - **Вкладка "Таблица данных"**: Детальная информация по каждому исследованию с поиском
+   - **Вкладка "Проблемы"**: Список ошибок и предупреждений
+   - **Вкладка "Экспорт"**: Скачивание отчётов в различных форматах
+
+---
 
 ## Форматы отчётов
 
@@ -73,9 +135,12 @@ python dcmmetatest_plus.py --help
 ### CSV
 - `report_modality.csv` — статистика по модальностям
 - `report_nonanon.csv` — список неанонимных исследований
+- Полный список исследований с метаданными
 
 ### JSON
 Полный отчёт со всеми деталями в машиночитаемом формате.
+
+---
 
 ## Конфигурация через YAML/JSON
 
@@ -100,10 +165,43 @@ follow_symlinks: false
 Запуск с конфигом:
 
 ```bash
-python dcmmetatest_plus.py /path/to/dataset --config config.yaml
+python -m src.dcmmetatest.cli /path/to/dataset --config config.yaml
 ```
 
+---
+
+## Структура проекта
+
+```
+.
+├── app.py                     # Точка входа Streamlit (веб-интерфейс)
+├── dcmmetatest_plus.py        # Legacy скрипт (для обратной совместимости)
+├── requirements.txt           # Зависимости
+├── pyproject.toml            # Конфигурация проекта
+├── README.md                 # Документация
+├── src/
+│   └── dcmmetatest/
+│       ├── __init__.py       # Публичный API
+│       ├── analyzer.py       # Логика анализа
+│       ├── cli.py            # CLI интерфейс
+│       ├── detectors.py      # Детекторы DICOM и разметки
+│       ├── io.py             # Операции ввода-вывода
+│       ├── models.py         # Модели данных
+│       ├── ui.py             # Утилиты для веб-интерфейса
+│       └── utils.py          # Вспомогательные функции
+└── tests/
+    └── test_dcmmetatest.py   # Юнит-тесты
+```
+
+---
+
 ## Разработка
+
+### Установка для разработки
+
+```bash
+pip install -e ".[dev]"
+```
 
 ### Запуск тестов
 
@@ -111,25 +209,97 @@ python dcmmetatest_plus.py /path/to/dataset --config config.yaml
 pytest tests/ -v
 ```
 
-### Линтинг
+### Линтинг и форматирование
 
 ```bash
-black dcmmetatest_plus.py
-ruff check dcmmetatest_plus.py
-mypy dcmmetatest_plus.py
+# Форматирование кода
+black src/ app.py
+
+# Проверка стиля
+ruff check src/ app.py
+
+# Проверка типов
+mypy src/
 ```
 
-## Структура проекта
+### Pre-commit хуки (опционально)
 
+Создайте файл `.pre-commit-config.yaml`:
+
+```yaml
+repos:
+  - repo: https://github.com/psf/black
+    rev: 23.0.0
+    hooks:
+      - id: black
+  - repo: https://github.com/astral-sh/ruff
+    rev: v0.1.0
+    hooks:
+      - id: ruff
+  - repo: https://github.com/pre-commit/mirrors-mypy
+    rev: v1.5.0
+    hooks:
+      - id: mypy
+        additional_dependencies: [types-PyYAML]
 ```
-.
-├── dcmmetatest_plus.py    # Основной скрипт
-├── requirements.txt       # Зависимости
-├── pyproject.toml        # Конфигурация проекта
-├── README.md             # Документация
-├── src/                  # Исходный код (для будущей модуляризации)
-└── tests/                # Тесты
+
+Установите pre-commit:
+
+```bash
+pip install pre-commit
+pre-commit install
 ```
+
+---
+
+## Требования
+
+- Python 3.8+
+- Зависимости указаны в `requirements.txt`
+
+### Основные зависимости
+
+- `pydicom` — работа с DICOM-файлами
+- `pandas` — обработка табличных данных
+- `tqdm` — индикаторы прогресса
+- `typer` + `rich` — CLI интерфейс
+- `streamlit` — веб-интерфейс
+- `plotly` — интерактивные графики
+
+---
+
+## Примеры использования
+
+### Сценарий 1: Быстрая проверка датасета
+
+```bash
+# CLI
+python -m src.dcmmetatest.cli /data/dicom_dataset --only-labeled --output labeled_report.txt
+
+# Или через веб-интерфейс
+streamlit run app.py
+# Ввести путь, нажать "Запустить анализ", просмотреть результаты
+```
+
+### Сценарий 2: Поиск проблемных файлов
+
+```bash
+python -m src.dcmmetatest.cli /data/dicom_dataset --output errors.json
+# Открыть errors.json и найти записи с has_label=false
+```
+
+### Сценарий 3: Анализ большого архива
+
+```bash
+python -m src.dcmmetatest.cli /data/large_archive \
+  --group-by study \
+  --executor process \
+  --workers 8 \
+  --modality-filter CT MR \
+  --output large_analysis.csv
+```
+
+---
 
 ## Лицензия
 
