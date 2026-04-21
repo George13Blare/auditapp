@@ -597,7 +597,9 @@ def create_overlay_image(image: np.ndarray, mask: np.ndarray, colormap: str = "j
 
     # Наложение
     result = img_rgb.astype(np.float32) / 255.0
-    result = result * (1 - mask_rgba[..., 3:4]) + mask_rgba[..., :3] * mask_rgba[..., 3:4]
-    result = np.clip(result * 255, 0, 255).astype(np.uint8)
+    alpha_channel = mask_rgba[..., 3:4].astype(np.float32)
+    rgb_mask = mask_rgba[..., :3].astype(np.float32)
+    blended = result * (1 - alpha_channel) + rgb_mask * alpha_channel
+    result = np.clip(blended * 255, 0, 255).astype(np.uint8)
 
     return cast(npt.NDArray[np.uint8], result)
