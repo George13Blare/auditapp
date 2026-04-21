@@ -125,27 +125,27 @@ def extract_segmentation_info(dcm_path: Path) -> SegmentationMask | None:
         ds = pydicom.dcmread(dcm_path, force=True)
 
         # Проверка, что это SEG
-        if not hasattr(ds, 'Modality') or ds.Modality != 'SEG':
+        if not hasattr(ds, "Modality") or ds.Modality != "SEG":
             return None
 
         mask = SegmentationMask(
             file_path=str(dcm_path),
-            mask_name=getattr(ds, 'SeriesDescription', f'SEG_{dcm_path.stem}'),
-            modality='SEG',
-            series_description=getattr(ds, 'SeriesDescription', ''),
+            mask_name=getattr(ds, "SeriesDescription", f"SEG_{dcm_path.stem}"),
+            modality="SEG",
+            series_description=getattr(ds, "SeriesDescription", ""),
         )
 
         # Извлечение информации о классах из Segment Sequence
-        if hasattr(ds, 'SegmentSequence'):
+        if hasattr(ds, "SegmentSequence"):
             for idx, segment in enumerate(ds.SegmentSequence):
                 class_mapping = ClassMapping(
-                    class_name=getattr(segment, 'SegmentLabel', f'Class_{idx}'),
+                    class_name=getattr(segment, "SegmentLabel", f"Class_{idx}"),
                     class_id=idx + 1,
-                    description=getattr(segment, 'SegmentDescription', ''),
+                    description=getattr(segment, "SegmentDescription", ""),
                 )
 
                 # Попытка извлечь цвет
-                if hasattr(segment, 'RecommendedDisplayCIELabValue'):
+                if hasattr(segment, "RecommendedDisplayCIELabValue"):
                     # Конвертация из CIELab в RGB (упрощённо)
                     class_mapping.color = (255, 255, 255)  # Заглушка
 
@@ -177,16 +177,16 @@ def load_class_dictionary(json_path: Path) -> dict[str, ClassMapping]:
         Словарь маппинга классов
     """
     try:
-        with open(json_path, encoding='utf-8') as f:
+        with open(json_path, encoding="utf-8") as f:
             data = json.load(f)
 
         class_dict = {}
-        for cls in data.get('classes', []):
+        for cls in data.get("classes", []):
             mapping = ClassMapping(
-                class_name=cls.get('name', f"Class_{cls.get('id')}"),
-                class_id=cls.get('id', 0),
-                description=cls.get('description', ''),
-                color=tuple(cls.get('color', [255, 255, 255])),
+                class_name=cls.get("name", f"Class_{cls.get('id')}"),
+                class_id=cls.get("id", 0),
+                description=cls.get("description", ""),
+                color=tuple(cls.get("color", [255, 255, 255])),
             )
             class_dict[mapping.class_name] = mapping
 
@@ -210,18 +210,18 @@ def save_class_dictionary(class_dict: dict[str, ClassMapping], json_path: Path) 
     """
     try:
         data = {
-            'classes': [
+            "classes": [
                 {
-                    'id': mapping.class_id,
-                    'name': mapping.class_name,
-                    'description': mapping.description,
-                    'color': list(mapping.color),
+                    "id": mapping.class_id,
+                    "name": mapping.class_name,
+                    "description": mapping.description,
+                    "color": list(mapping.color),
                 }
                 for mapping in class_dict.values()
             ]
         }
 
-        with open(json_path, 'w', encoding='utf-8') as f:
+        with open(json_path, "w", encoding="utf-8") as f:
             json.dump(data, f, indent=2, ensure_ascii=False)
 
         return True
@@ -261,8 +261,8 @@ def normalize_dataset(
     output_dir.mkdir(parents=True, exist_ok=True)
 
     # Сбор информации о файлах
-    all_files = list(input_dir.rglob('*'))
-    dcm_files = [f for f in all_files if f.suffix.lower() in ['.dcm', '.dicom', '']]
+    all_files = list(input_dir.rglob("*"))
+    dcm_files = [f for f in all_files if f.suffix.lower() in [".dcm", ".dicom", ""]]
     seg_files = []
 
     stats.total_files = len(dcm_files)
@@ -276,23 +276,23 @@ def normalize_dataset(
 
             ds = pydicom.dcmread(dcm_file, force=True)
 
-            patient_id = getattr(ds, 'PatientID', 'UNKNOWN')
-            study_id = getattr(ds, 'StudyInstanceUID', 'UNKNOWN')
-            series_id = getattr(ds, 'SeriesInstanceUID', 'UNKNOWN')
+            patient_id = getattr(ds, "PatientID", "UNKNOWN")
+            study_id = getattr(ds, "StudyInstanceUID", "UNKNOWN")
+            series_id = getattr(ds, "SeriesInstanceUID", "UNKNOWN")
 
             if patient_id not in patient_studies:
                 patient_studies[patient_id] = {}
             if study_id not in patient_studies[patient_id]:
-                patient_studies[patient_id][study_id] = {'series': {}, 'files': []}
+                patient_studies[patient_id][study_id] = {"series": {}, "files": []}
 
-            patient_studies[patient_id][study_id]['files'].append(dcm_file)
+            patient_studies[patient_id][study_id]["files"].append(dcm_file)
 
-            if series_id not in patient_studies[patient_id][study_id]['series']:
-                patient_studies[patient_id][study_id]['series'][series_id] = []
-            patient_studies[patient_id][study_id]['series'][series_id].append(dcm_file)
+            if series_id not in patient_studies[patient_id][study_id]["series"]:
+                patient_studies[patient_id][study_id]["series"][series_id] = []
+            patient_studies[patient_id][study_id]["series"][series_id].append(dcm_file)
 
             # Проверка на сегментацию
-            if hasattr(ds, 'Modality') and ds.Modality == 'SEG':
+            if hasattr(ds, "Modality") and ds.Modality == "SEG":
                 seg_files.append(dcm_file)
                 stats.segmentations_found += 1
 
@@ -314,7 +314,7 @@ def normalize_dataset(
                 study_dir.mkdir(exist_ok=True)
 
                 # Копирование файлов изображений
-                for series_id, series_files in study_data['series'].items():
+                for series_id, series_files in study_data["series"].items():
                     series_dir = study_dir / f"series_{series_id}"
                     series_dir.mkdir(exist_ok=True)
 
@@ -326,8 +326,8 @@ def normalize_dataset(
                                 series=series_id[:8],
                                 index=idx,
                             )
-                            if not new_name.endswith('.dcm'):
-                                new_name += '.dcm'
+                            if not new_name.endswith(".dcm"):
+                                new_name += ".dcm"
                         else:
                             new_name = src_file.name
 
@@ -353,22 +353,22 @@ def normalize_dataset(
     # Сохранение метаданных
     if config.extract_metadata:
         metadata = {
-            'total_patients': stats.total_patients,
-            'total_studies': stats.total_studies,
-            'total_files': stats.processed_files,
-            'segmentations': stats.segmentations_found,
-            'patients': list(patient_studies.keys()),
+            "total_patients": stats.total_patients,
+            "total_studies": stats.total_studies,
+            "total_files": stats.processed_files,
+            "segmentations": stats.segmentations_found,
+            "patients": list(patient_studies.keys()),
         }
 
         metadata_file = output_dir / config.metadata_file
-        with open(metadata_file, 'w', encoding='utf-8') as f:
+        with open(metadata_file, "w", encoding="utf-8") as f:
             json.dump(metadata, f, indent=2, ensure_ascii=False)
 
     # Сохранение структуры
     stats.output_structure = {
-        'patients': stats.total_patients,
-        'studies': stats.total_studies,
-        'files_processed': stats.processed_files,
+        "patients": stats.total_patients,
+        "studies": stats.total_studies,
+        "files_processed": stats.processed_files,
     }
 
     return stats
@@ -400,7 +400,7 @@ def split_dataset(
     # Сбор пациентов/исследований
     patients = []
     for item in input_dir.iterdir():
-        if item.is_dir() and item.name.startswith('patient_'):
+        if item.is_dir() and item.name.startswith("patient_"):
             patients.append(item)
 
     if not patients:
@@ -416,8 +416,8 @@ def split_dataset(
     n_val = max(1, int(n_total * config.val_ratio))
 
     train_patients = patients[:n_train]
-    val_patients = patients[n_train:n_train + n_val]
-    test_patients = patients[n_train + n_val:]
+    val_patients = patients[n_train : n_train + n_val]
+    test_patients = patients[n_train + n_val :]
 
     stats.train_patients = len(train_patients)
     stats.val_patients = len(val_patients)
@@ -439,31 +439,31 @@ def split_dataset(
 
         return sample_count
 
-    stats.train_samples = copy_split(train_patients, 'train')
-    stats.val_samples = copy_split(val_patients, 'val')
-    stats.test_samples = copy_split(test_patients, 'test')
+    stats.train_samples = copy_split(train_patients, "train")
+    stats.val_samples = copy_split(val_patients, "val")
+    stats.test_samples = copy_split(test_patients, "test")
 
     # Создание манифеста
     if config.create_manifest:
         manifest = {
-            'config': {
-                'train_ratio': config.train_ratio,
-                'val_ratio': config.val_ratio,
-                'test_ratio': config.test_ratio,
-                'seed': config.seed,
+            "config": {
+                "train_ratio": config.train_ratio,
+                "val_ratio": config.val_ratio,
+                "test_ratio": config.test_ratio,
+                "seed": config.seed,
             },
-            'stats': {
-                'train': {'patients': stats.train_patients, 'samples': stats.train_samples},
-                'val': {'patients': stats.val_patients, 'samples': stats.val_samples},
-                'test': {'patients': stats.test_patients, 'samples': stats.test_samples},
+            "stats": {
+                "train": {"patients": stats.train_patients, "samples": stats.train_samples},
+                "val": {"patients": stats.val_patients, "samples": stats.val_samples},
+                "test": {"patients": stats.test_patients, "samples": stats.test_samples},
             },
-            'train_patients': [p.name for p in train_patients],
-            'val_patients': [p.name for p in val_patients],
-            'test_patients': [p.name for p in test_patients],
+            "train_patients": [p.name for p in train_patients],
+            "val_patients": [p.name for p in val_patients],
+            "test_patients": [p.name for p in test_patients],
         }
 
-        manifest_file = output_dir / 'split_manifest.json'
-        with open(manifest_file, 'w', encoding='utf-8') as f:
+        manifest_file = output_dir / "split_manifest.json"
+        with open(manifest_file, "w", encoding="utf-8") as f:
             json.dump(manifest, f, indent=2, ensure_ascii=False)
 
         stats.split_manifest = manifest
@@ -486,30 +486,32 @@ def analyze_segmentation_masks(dataset_path: str) -> dict[str, Any]:
     all_classes = set()
 
     # Поиск SEG файлов
-    seg_files = list(dataset_dir.rglob('*.dcm')) + list(dataset_dir.rglob('*.dicom'))
+    seg_files = list(dataset_dir.rglob("*.dcm")) + list(dataset_dir.rglob("*.dicom"))
 
     for seg_file in seg_files:
         mask_info = extract_segmentation_info(seg_file)
         if mask_info:
-            masks_info.append({
-                'file': str(seg_file),
-                'name': mask_info.mask_name,
-                'classes': [
-                    {
-                        'id': cls.class_id,
-                        'name': cls.class_name,
-                        'description': cls.description,
-                    }
-                    for cls in mask_info.classes
-                ],
-            })
+            masks_info.append(
+                {
+                    "file": str(seg_file),
+                    "name": mask_info.mask_name,
+                    "classes": [
+                        {
+                            "id": cls.class_id,
+                            "name": cls.class_name,
+                            "description": cls.description,
+                        }
+                        for cls in mask_info.classes
+                    ],
+                }
+            )
 
             for cls in mask_info.classes:
                 all_classes.add(cls.class_name)
 
     return {
-        'total_masks': len(masks_info),
-        'masks': masks_info,
-        'unique_classes': list(all_classes),
-        'total_classes': len(all_classes),
+        "total_masks": len(masks_info),
+        "masks": masks_info,
+        "unique_classes": list(all_classes),
+        "total_classes": len(all_classes),
     }
