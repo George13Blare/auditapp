@@ -7,7 +7,7 @@ import json
 import logging
 from dataclasses import dataclass, field
 from pathlib import Path
-from typing import Any, TextIO
+from typing import Any
 
 try:
     import pydicom
@@ -669,9 +669,8 @@ def anonymize_study(
     # Сохранение mapping файла если нужно
     if config.create_mapping_file and not config.dry_run:
         mapping_file = output_path / "anonymization_mapping.json"
-        with open(str(mapping_file), "w", encoding="utf-8") as f:  # type: ignore[arg-type]
-            f_: TextIO = f  # type: ignore[assignment]
-            json.dump(mapping, f_, indent=2, ensure_ascii=False)
+        with open(mapping_file, "w", encoding="utf-8") as f:  # type: ignore[assignment, arg-type]
+            json.dump(mapping, f, indent=2, ensure_ascii=False)  # type: ignore[arg-type]
         logger.info("Файл маппинга сохранён: %s", mapping_file)
 
     return True, f"Успешно анонимизировано {stats.processed_files} файлов"
