@@ -10,6 +10,9 @@ Streamlit приложение для визуального анализа DICO
 """
 
 import logging
+import os
+import shutil
+from pathlib import Path
 
 import streamlit as st
 
@@ -39,6 +42,18 @@ st.title("🏥 DICOM Dataset Analyzer")
 st.markdown("""
 Интерактивный инструмент для анализа DICOM-датасетов, проверки разметки и качества данных.
 """)
+
+# Инициализация session state
+if "analysis_in_progress" not in st.session_state:
+    st.session_state.analysis_in_progress = False
+if "progress_value" not in st.session_state:
+    st.session_state.progress_value = 0
+if "progress_status" not in st.session_state:
+    st.session_state.progress_status = ""
+if "dataset_structure" not in st.session_state:
+    st.session_state.dataset_structure = None
+if "selected_folder_path" not in st.session_state:
+    st.session_state.selected_folder_path = None
 
 # Боковая панель
 st.sidebar.header("⚙️ Настройки анализа")
@@ -84,6 +99,86 @@ modality_filter = st.sidebar.multiselect(
 # Кнопка запуска анализа
 analyze_button = st.sidebar.button("🚀 Запустить анализ", type="primary", disabled=not folder_path)
 
+# Функция для сканирования структуры датасета
+def scan_dataset_structure(path: str, max_depth: int = 3) -> dict:
+    """Сканирует структуру датасета и возвращает её в виде дерева."""
+    def scan_dir(dir_path: Path, current_depth: int) -> dict | None:
+        if current_depth > max_depth:
+            return None
+        
+        try:
+            items = sorted(dir_path.iterdir(), key=lambda x: (x.is_file(), x.name.lower()))
+        except PermissionError:
+            return {"name": dir_path.name, "type": "dir", "error": "Нет доступа", "children": []}
+        
+        children = []
+        for item in items[:50]:  # Ограничиваем количество элементов для производительности
+            if item.is_dir():
+                child = scan_dir(item, current_depth + 1)
+                if child:
+                    children.append(child)
+            else:
+                children.append({
+                    "name": item.name,
+                    "type": "file",
+                    "size": item.stat().st_size,
+                })
+        
+        return {
+            "name": dir_path.name,
+            "type": "dir",
+            "path": str(dir_path),
+            "children": children,
+            "total_items": len(items),
+        }
+    
+    root_path = Path(path)
+    if not root_path.exists():
+        return None
+    
+    return scan_dir(root_path, 0)
+
+# Функция для удаления файла/папки
+def delete_item(item_path: str) -> tuple[bool, str]:
+    """Удаляет файл или пустую папку."""
+    path = Path(item_path)
+    if not path.exists():
+        return False, "Файл/папка не существует"
+    
+    try:
+        if path.is_file():
+            path.unlink()
+            return True, f"Файл удалён: {item_path}"
+        elif path.is_dir():
+            if any(path.iterdir()):
+                return False, "Папка не пуста. Удалите сначала содержимое."
+            path.rmdir()
+            return True, f"Папка удалена: {item_path}"
+    except Exception as e:
+        return False, f"Ошибка удаления: {e!s}"
+    
+    return False, "Неизвестная ошибка"
+
+# Функция для переименования файла/папки
+def rename_item(old_path: str, new_name: str) -> tuple[bool, str]:
+    """Переименовывает файл или папку."""
+    old = Path(old_path)
+    if not old.exists():
+        return False, "Файл/папка не существует"
+    
+    new = old.parent / new_name
+    if new.exists():
+        return False, "Файл/папка с таким именем уже существует"
+    
+    try:
+        old.rename(new)
+        return True, f"Переименовано в: {new_name}"
+    except Exception as e:
+        return False, f"Ошибка переименования: {e!s}"
+
+# Зона прогресс бара (отдельная выделенная область)
+progress_container = st.container()
+
 # Основная область
 if analyze_button:
     # Валидация пути
@@ -94,6 +189,7 @@ if analyze_button:
         st.stop()
 
     valid_path = path_or_error
+    st.session_state.selected_folder_path = valid_path
     st.success(f"✅ Путь проверен: {valid_path}")
 
     # Подготовка конфигурации
@@ -113,13 +209,58 @@ if analyze_button:
         "only_non_anon": False,
     }
 
-    # Запуск анализа с индикатором прогресса
-    with st.spinner("🔍 Анализ датасета... Это может занять некоторое время."):
+    # Запуск анализа с индикатором прогресса в отдельной зоне
+    with progress_container:
+        st.markdown("### ⏳ Прогресс анализа")
+        progress_bar = st.progress(0)
+        progress_text = st.empty()
+        progress_status = st.empty()
+        
+        # Имитация прогресса (т.к. анализ может быть длительным)
+        progress_status.info("🔍 Начато сканирование датасета...")
+        
         try:
-            report = cached_run_analysis(valid_path, config_dict)
+            # Асинхронный запуск с обновлением прогресса
+            import threading
+            import time
+            
+            analysis_complete = threading.Event()
+            analysis_result = {}
+            analysis_error = {}
+            
+            def run_analysis_thread():
+                try:
+                    result = cached_run_analysis(valid_path, config_dict)
+                    analysis_result["report"] = result
+                except Exception as e:
+                    analysis_error["error"] = e
+                finally:
+                    analysis_complete.set()
+            
+            thread = threading.Thread(target=run_analysis_thread)
+            thread.start()
+            
+            # Обновление прогресс бара
+            progress_value = 0
+            while not analysis_complete.wait(timeout=0.5):
+                progress_value = min(progress_value + 5, 90)
+                progress_bar.progress(progress_value)
+                progress_text.text(f"Обработка... {progress_value}%")
+            
+            thread.join()
+            
+            if analysis_error:
+                raise analysis_error["error"]
+            
+            report = analysis_result["report"]
+            progress_bar.progress(100)
+            progress_text.text("Анализ завершён!")
+            progress_status.success("✅ Анализ успешно завершён")
+            
         except Exception as e:
             st.error(f"❌ Ошибка при анализе: {str(e)}")
             logger.exception("Analysis failed")
+            progress_status.error(f"❌ Ошибка: {str(e)}")
             st.stop()
 
     # Отображение результатов
@@ -148,8 +289,8 @@ if analyze_button:
 
     st.divider()
 
-    # Вкладки
-    tab1, tab2, tab3, tab4 = st.tabs(["📈 Графики", "📋 Таблица данных", "⚠️ Проблемы", "📄 Экспорт"])
+    # Вкладки с добавлением редактора структуры
+    tab1, tab2, tab3, tab4, tab5 = st.tabs(["📈 Графики", "📋 Таблица данных", "⚠️ Проблемы", "📄 Экспорт", "🗂️ Редактор структуры"])
 
     with tab1:
         st.subheader("Визуализация данных")
@@ -279,6 +420,138 @@ if analyze_button:
                     file_name="dicom_analysis_report.txt",
                     mime="text/plain",
                 )
+
+    # Вкладка редактора структуры датасета
+    with tab5:
+        st.subheader("🗂️ Редактор структуры датасета")
+        st.markdown("""
+        Инструмент для просмотра и редактирования структуры вашего DICOM-датасета.
+        
+        **Возможности:**
+        - Просмотр древовидной структуры
+        - Переименование файлов и папок
+        - Удаление пустых папок и файлов
+        """)
+        
+        if st.session_state.selected_folder_path:
+            # Кнопка обновления структуры
+            if st.button("🔄 Обновить структуру", key="refresh_structure"):
+                st.session_state.dataset_structure = scan_dataset_structure(st.session_state.selected_folder_path)
+                st.rerun()
+            
+            # Сканирование структуры если ещё не сделано
+            if st.session_state.dataset_structure is None:
+                with st.spinner("Сканирование структуры..."):
+                    st.session_state.dataset_structure = scan_dataset_structure(st.session_state.selected_folder_path)
+            
+            if st.session_state.dataset_structure:
+                # Функция для рекурсивного отображения дерева
+                def render_tree(node, level=0, parent_key=""):
+                    indent = "  " * level
+                    node_key = f"{parent_key}/{node['name']}" if parent_key else node['name']
+                    
+                    if node['type'] == 'dir':
+                        # Отображение папки
+                        col_icon, col_name, col_actions = st.columns([0.1, 0.7, 0.2])
+                        
+                        with col_icon:
+                            st.write("📁")
+                        
+                        with col_name:
+                            st.markdown(f"**{node['name']}**")
+                            if 'total_items' in node:
+                                st.caption(f"Элементов: {node['total_items']}")
+                        
+                        with col_actions:
+                            # Переименование
+                            new_name = st.text_input(
+                                "Переименовать",
+                                value=node['name'],
+                                key=f"rename_{node_key}",
+                                placeholder="Новое имя",
+                                label_visibility="collapsed"
+                            )
+                            if st.button("✏️", key=f"btn_rename_{node_key}", help="Переименовать"):
+                                if new_name and new_name != node['name']:
+                                    success, msg = rename_item(node.get('path', ''), new_name)
+                                    if success:
+                                        st.success(msg)
+                                        st.session_state.dataset_structure = None  # Сброс кэша
+                                        st.rerun()
+                                    else:
+                                        st.error(msg)
+                            
+                            # Удаление (только пустые папки)
+                            if st.button("🗑️", key=f"btn_delete_{node_key}", help="Удалить пустую папку"):
+                                success, msg = delete_item(node.get('path', ''))
+                                if success:
+                                    st.success(msg)
+                                    st.session_state.dataset_structure = None  # Сброс кэша
+                                    st.rerun()
+                                else:
+                                    st.error(msg)
+                        
+                        # Рекурсивный рендеринг дочерних элементов
+                        if 'children' in node and node['children']:
+                            with st.expander(f"Открыть папку {node['name']}", expanded=(level < 1)):
+                                for child in node['children']:
+                                    render_tree(child, level + 1, node_key)
+                    
+                    else:
+                        # Отображение файла
+                        col_icon, col_name, col_size, col_actions = st.columns([0.1, 0.6, 0.15, 0.15])
+                        
+                        with col_icon:
+                            st.write("📄")
+                        
+                        with col_name:
+                            st.write(node['name'])
+                        
+                        with col_size:
+                            size_kb = node.get('size', 0) / 1024
+                            if size_kb < 1024:
+                                st.caption(f"{size_kb:.1f} KB")
+                            else:
+                                st.caption(f"{size_kb/1024:.1f} MB")
+                        
+                        with col_actions:
+                            # Переименование файла
+                            new_name = st.text_input(
+                                "Имя",
+                                value=node['name'],
+                                key=f"rename_{node_key}",
+                                placeholder="Новое имя",
+                                label_visibility="collapsed"
+                            )
+                            if st.button("✏️", key=f"btn_rename_{node_key}", help="Переименовать"):
+                                if new_name and new_name != node['name']:
+                                    # Для файлов нужен путь
+                                    file_path = str(Path(st.session_state.selected_folder_path) / node_key)
+                                    success, msg = rename_item(file_path, new_name)
+                                    if success:
+                                        st.success(msg)
+                                        st.session_state.dataset_structure = None  # Сброс кэша
+                                        st.rerun()
+                                    else:
+                                        st.error(msg)
+                            
+                            # Удаление файла
+                            if st.button("🗑️", key=f"btn_delete_{node_key}", help="Удалить файл"):
+                                file_path = str(Path(st.session_state.selected_folder_path) / node_key)
+                                success, msg = delete_item(file_path)
+                                if success:
+                                    st.success(msg)
+                                    st.session_state.dataset_structure = None  # Сброс кэша
+                                    st.rerun()
+                                else:
+                                    st.error(msg)
+                
+                # Рендеринг дерева начиная с корня
+                render_tree(st.session_state.dataset_structure)
+            else:
+                st.warning("Не удалось сканировать структуру датасета")
+        else:
+            st.info("Сначала запустите анализ датасета")
 
 else:
     # Стартовая страница
