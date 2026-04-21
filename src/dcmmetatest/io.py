@@ -148,7 +148,8 @@ def find_dicom_studies_by_dir(
                 if is_dicom_file(p):
                     has_dcm = True
                     break
-            except Exception:
+            except Exception as e:
+                logger.debug("Ошибка проверки DICOM файла %s: %s", p, e)
                 continue
 
         if has_dcm:
@@ -199,7 +200,8 @@ def find_dicom_studies_by_uid(
                 uid = str(ds[0x0020, 0x000D].value).strip()
             if uid:
                 studies[uid].append(str(p))
-        except Exception:
+        except Exception as e:
+            logger.debug("Ошибка обработки файла %s: %s", p, e)
             continue
 
     return studies
@@ -295,7 +297,8 @@ def process_study_dir(
                 has_label = True
                 label_sources.add("label_json")
                 break
-        except Exception:
+        except Exception as e:
+            logger.debug("Ошибка проверки JSON файла %s: %s", jf, e)
             pass
 
     # Проверка файлов масок по шаблонам
@@ -444,7 +447,8 @@ def process_study_uid(
             patient_id = str(ds.get((0x0010, 0x0020), "")).strip()
             if patient_id:
                 patient_ids.add(patient_id)
-        except Exception:
+        except Exception as e:
+            logger.debug("Ошибка чтения PatientID из %s: %s", files[0], e)
             pass
 
     return StudyResult(
