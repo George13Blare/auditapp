@@ -86,7 +86,7 @@ class ProcessedImage:
 
 def apply_windowing(
     array: np.ndarray, window_center: float, window_width: float, output_dtype: type = np.float32
-) -> np.ndarray:
+) -> npt.NDArray[np.float32]:
     """
     Применяет windowing к массиву интенсивностей.
 
@@ -108,7 +108,7 @@ def apply_windowing(
     windowed = np.clip(array, lower_bound, upper_bound)
     windowed = (windowed - lower_bound) / window_width
 
-    return windowed.astype(output_dtype)
+    return cast(npt.NDArray[np.float32], windowed.astype(output_dtype))
 
 
 def normalize_intensity(
