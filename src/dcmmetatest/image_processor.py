@@ -4,6 +4,8 @@
 Функции для чтения, нормализации, конвертации и визуализации DICOM данных.
 """
 
+from __future__ import annotations
+
 import logging
 from dataclasses import dataclass, field
 from enum import Enum
