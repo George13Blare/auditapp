@@ -9,6 +9,7 @@ Streamlit приложение для визуального анализа DICO
     python -m streamlit run app.py
 """
 
+import json
 import logging
 from pathlib import Path
 
