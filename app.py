@@ -39,6 +39,8 @@ from src.dcmmetatest.ui import (
     create_study_date_timeline,
     run_preprocessing_pipeline,
     validate_folder_path,
+    AugmentationConfig,
+    PreprocessPipelineConfig,
 )
 from src.dcmmetatest.validation import scan_dataset_anomalies
 
