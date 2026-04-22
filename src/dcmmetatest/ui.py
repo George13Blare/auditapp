@@ -3,7 +3,6 @@
 from __future__ import annotations
 
 import logging
-from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any
 
@@ -12,7 +11,6 @@ import plotly.express as px
 import plotly.graph_objects as go
 from streamlit.runtime.caching import cache_data
 
-from .analyzer import run_analysis
 from .image_processor import (
     AugmentationConfig,
     PreprocessingPipelineConfig,
@@ -258,6 +256,8 @@ def cached_run_analysis(folder_path: str, config_dict: dict) -> AnalysisReport:
     Returns:
         Отчёт анализа
     """
+    from .analyzer import run_analysis
+
     config = WorkerConfig(**config_dict)
     return run_analysis(folder_path, config, debug=False)
 

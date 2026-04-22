@@ -40,14 +40,29 @@ from src.dcmmetatest.services import (
     validate_dataset_path,
 )
 from src.dcmmetatest.ui import (
+from dcmmetatest.image_processor import (
+    PreprocessingPipelineConfig,
+    preprocess_dataset_pipeline,
+)
+from dcmmetatest.normalizer import (
+    NormalizationConfig,
+    analyze_segmentation_masks,
+    normalize_dataset,
+)
+from dcmmetatest.split import SplitConfig, split_dataset
+from dcmmetatest.ui import (
+    AugmentationConfig,
+    cached_run_analysis,
     convert_report_to_dataframe,
     create_age_distribution_chart,
     create_label_source_bar_chart,
     create_modality_pie_chart,
     create_quality_metrics_cards,
     create_study_date_timeline,
+    run_preprocessing_pipeline,
+    validate_folder_path,
 )
-from src.dcmmetatest.validation import scan_dataset_anomalies
+from dcmmetatest.validation import scan_dataset_anomalies
 
 # Настройка страницы
 st.set_page_config(
