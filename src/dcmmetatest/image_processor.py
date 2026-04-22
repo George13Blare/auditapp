@@ -215,7 +215,11 @@ def apply_augmentations(
 
     # Для 2D приводим к псевдо-3D [1, H, W], чтобы использовать единый код
     array_work = array[np.newaxis, ...] if array.ndim == 2 else array.copy()
-    mask_work = mask[np.newaxis, ...] if mask is not None and mask.ndim == 2 else (mask.copy() if mask is not None else None)
+    mask_work = (
+        mask[np.newaxis, ...]
+        if mask is not None and mask.ndim == 2
+        else (mask.copy() if mask is not None else None)
+    )
 
     rotate_k = config.rotate_k % 4
     if rotate_k:
@@ -310,7 +314,12 @@ def crop_to_roi(
     return cropped_image, cropped_mask
 
 
-def _interp_along_axis(array: np.ndarray, source_coords: np.ndarray, target_coords: np.ndarray, axis: int) -> np.ndarray:
+def _interp_along_axis(
+    array: np.ndarray,
+    source_coords: np.ndarray,
+    target_coords: np.ndarray,
+    axis: int,
+) -> np.ndarray:
     """Линейная интерполяция массива вдоль выбранной оси."""
     moved = np.moveaxis(array, axis, 0)
     result_shape = (len(target_coords),) + moved.shape[1:]
