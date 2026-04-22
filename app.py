@@ -15,6 +15,8 @@ from pathlib import Path
 import streamlit as st
 
 from src.dcmmetatest.ui import (
+    AugmentationConfig,
+    PreprocessPipelineConfig,
     cached_run_analysis,
     convert_report_to_dataframe,
     create_age_distribution_chart,
@@ -27,6 +29,7 @@ from src.dcmmetatest.ui import (
     AugmentationConfig,
     PreprocessPipelineConfig,
 )
+from src.dcmmetatest.validation import scan_dataset_anomalies
 
 # Настройка страницы
 st.set_page_config(
@@ -42,9 +45,11 @@ logger = logging.getLogger(__name__)
 
 # Заголовок
 st.title("🏥 DICOM Dataset Analyzer")
-st.markdown("""
+st.markdown(
+    """
 Интерактивный инструмент для анализа DICOM-датасетов, проверки разметки и качества данных.
-""")
+"""
+)
 
 # Инициализация session state
 if "analysis_in_progress" not in st.session_state:
@@ -61,6 +66,10 @@ if "analysis_history" not in st.session_state:
     st.session_state.analysis_history = []  # История анализов
 if "structure_templates" not in st.session_state:
     st.session_state.structure_templates = {}  # Шаблоны структуры
+if "schema_builder_levels" not in st.session_state:
+    st.session_state.schema_builder_levels = ["patient_level", "study_level", "series_level"]
+if "schema_builder_file_patterns" not in st.session_state:
+    st.session_state.schema_builder_file_patterns = "*.dcm"
 if "current_report" not in st.session_state:
     st.session_state.current_report = None  # Текущий отчёт для доступа из других вкладок
 
@@ -460,12 +469,49 @@ if analyze_button:
                 for folder in report.empty_folders:
                     st.text(folder)
 
+        st.divider()
+        st.markdown("### 🧪 Бета: углублённый поиск аномалий")
+        st.caption("Проверяет битые DICOM, пустые SEG-маски и дубликаты SOPInstanceUID.")
+
+        if st.button("🔍 Запустить сканер аномалий", key="scan_anomalies_btn"):
+            with st.spinner("Сканирование аномалий..."):
+                anomalies = scan_dataset_anomalies(st.session_state.selected_folder_path, max_files=10000)
+
+            if anomalies["errors"]:
+                st.error(f"Ошибки сканера: {'; '.join(anomalies['errors'])}")
+            else:
+                col_a1, col_a2, col_a3, col_a4 = st.columns(4)
+                with col_a1:
+                    st.metric("Проверено файлов", anomalies["scanned_files"])
+                with col_a2:
+                    st.metric("Битые файлы", len(anomalies["broken_files"]))
+                with col_a3:
+                    st.metric("Пустые SEG", len(anomalies["empty_seg_masks"]))
+                with col_a4:
+                    st.metric("Дубликаты SOP UID", len(anomalies["duplicate_sop_instance_uid"]))
+
+                if anomalies["broken_files"]:
+                    with st.expander("Показать битые файлы"):
+                        for p in anomalies["broken_files"][:100]:
+                            st.text(p)
+
+                if anomalies["empty_seg_masks"]:
+                    with st.expander("Показать пустые SEG-маски"):
+                        for p in anomalies["empty_seg_masks"][:100]:
+                            st.text(p)
+
+                if anomalies["duplicate_sop_instance_uid"]:
+                    with st.expander("Показать дубликаты SOPInstanceUID"):
+                        st.json(anomalies["duplicate_sop_instance_uid"])
+
     with tab4:
         st.subheader("Экспорт отчёта")
 
-        st.markdown("""
+        st.markdown(
+            """
         Выберите формат для экспорта результатов анализа.
-        """)
+        """
+        )
 
         col_exp1, col_exp2, col_exp3 = st.columns(3)
 
@@ -533,14 +579,16 @@ if analyze_button:
     # Вкладка редактора структуры датасета
     with tab5:
         st.subheader("🗂️ Редактор структуры датасета")
-        st.markdown("""
+        st.markdown(
+            """
         Инструмент для просмотра и редактирования структуры вашего DICOM-датасета.
 
         **Возможности:**
         - Просмотр древовидной структуры
         - Переименование файлов и папок
         - Удаление пустых папок и файлов
-        """)
+        """
+        )
 
         if st.session_state.selected_folder_path:
             # Кнопка обновления структуры
@@ -665,7 +713,8 @@ if analyze_button:
     # Вкладка конфигуратора структуры (редактор шаблонов)
     with tab6:
         st.subheader("⚙️ Конфигуратор структуры датасета")
-        st.markdown("""
+        st.markdown(
+            """
         Инструмент для создания и управления шаблонами ожидаемой структуры DICOM-датасета.
 
         **Возможности:**
@@ -673,7 +722,8 @@ if analyze_button:
         - Валидация реального датасета по шаблону
         - Сохранение и загрузка шаблонов в JSON
         - Автоматическое выявление отклонений от шаблона
-        """)
+        """
+        )
 
         col_tmpl1, col_tmpl2 = st.columns([2, 1])
 
@@ -691,10 +741,65 @@ if analyze_button:
             # Создание нового шаблона
             st.markdown("### ➕ Создать новый шаблон")
             new_template_name = st.text_input("Название шаблона", placeholder="например: CT_Chest_Standard")
+            schema_mode = st.radio(
+                "Режим создания схемы",
+                ["🧱 Конструктор", "🧾 JSON вручную"],
+                horizontal=True,
+                key="schema_mode",
+            )
 
-            template_structure = st.text_area(
-                "Структура шаблона (JSON формат)",
-                value="""{
+            def build_template_from_constructor(level_names: list[str], file_patterns: list[str]) -> dict:
+                nested: dict | list[str] = file_patterns
+                for level_name in reversed(level_names):
+                    nested = {level_name: nested}
+                return {"root": nested}
+
+            if schema_mode == "🧱 Конструктор":
+                st.markdown("#### Конструктор схемы")
+                st.caption("Добавьте уровни структуры и шаблоны файлов без ручного редактирования JSON.")
+
+                cols_builder = st.columns([1, 1, 2])
+                with cols_builder[0]:
+                    if st.button("➕ Уровень", key="builder_add_level"):
+                        st.session_state.schema_builder_levels.append(
+                            f"level_{len(st.session_state.schema_builder_levels) + 1}"
+                        )
+                with cols_builder[1]:
+                    if st.button("➖ Уровень", key="builder_remove_level"):
+                        if len(st.session_state.schema_builder_levels) > 1:
+                            st.session_state.schema_builder_levels.pop()
+
+                for idx, default_level_name in enumerate(st.session_state.schema_builder_levels):
+                    st.session_state.schema_builder_levels[idx] = st.text_input(
+                        f"Уровень {idx + 1}",
+                        value=default_level_name,
+                        key=f"builder_level_{idx}",
+                        help="Например: patient, study, series",
+                    )
+
+                patterns_raw = st.text_input(
+                    "Шаблоны файлов (через запятую)",
+                    value=st.session_state.schema_builder_file_patterns,
+                    key="builder_file_patterns",
+                    help="Например: *.dcm, *.nii.gz",
+                )
+                st.session_state.schema_builder_file_patterns = patterns_raw
+                file_patterns = [p.strip() for p in patterns_raw.split(",") if p.strip()]
+                if not file_patterns:
+                    file_patterns = ["*.dcm"]
+
+                generated_template = build_template_from_constructor(
+                    st.session_state.schema_builder_levels,
+                    file_patterns,
+                )
+                import json
+
+                template_structure = json.dumps(generated_template, indent=2, ensure_ascii=False)
+                st.code(template_structure, language="json")
+            else:
+                template_structure = st.text_area(
+                    "Структура шаблона (JSON формат)",
+                    value="""{
   "root": {
     "patient_level": {
       "study_level": {
@@ -703,9 +808,9 @@ if analyze_button:
     }
   }
 }""",
-                height=200,
-                help="Опишите ожидаемую структуру в формате JSON",
-            )
+                    height=200,
+                    help="Опишите ожидаемую структуру в формате JSON",
+                )
 
             if st.button("💾 Сохранить шаблон"):
                 if new_template_name and template_structure:
@@ -858,7 +963,8 @@ if analyze_button:
     # Вкладка анонимизатора DICOM
     with tab7:
         st.subheader("🔐 Анонимизатор DICOM-данных")
-        st.markdown("""
+        st.markdown(
+            """
         Инструмент для безопасной анонимизации DICOM-файлов с сохранением целостности исследований.
 
         **Возможности:**
@@ -870,7 +976,8 @@ if analyze_button:
         **Уровни анонимизации:**
         - **Basic**: Базовая анонимизация по стандарту DICOM PS3.15
         - **Full**: Полная анонимизация всех идентифицирующих полей
-        """)
+        """
+        )
 
         if st.session_state.selected_folder_path:
             from src.dcmmetatest.anonymizer import AnonymizationConfig, run_anonymization
@@ -958,7 +1065,8 @@ if analyze_button:
     # Вкладка истории анализов
     with tab8:
         st.subheader("📜 История анализов")
-        st.markdown("""
+        st.markdown(
+            """
         Журнал всех выполненных анализов датасетов в текущей сессии.
 
         **Информация в истории:**
@@ -967,7 +1075,8 @@ if analyze_button:
         - Количество исследований и файлов
         - Количество неанонимизированных пациентов
         - Использованная конфигурация
-        """)
+        """
+        )
 
         if st.session_state.analysis_history:
             # Отображение истории в виде таблицы
@@ -1039,7 +1148,8 @@ if analyze_button:
     # Вкладка бета-функционала: нормализация и сплит
     with tab9:
         st.subheader("🧪 Бета: Нормализация и разделение датасетов")
-        st.markdown("""
+        st.markdown(
+            """
         Экспериментальный раздел для нормализации структуры DICOM-датасетов и разделения на train/val/test.
 
         **Возможности:**
@@ -1047,9 +1157,10 @@ if analyze_button:
         - 🔀 Разделение на train/val/test с настройкой пропорций
         - 🏷️ Извлечение информации о масках сегментации
         - 📖 Работа со словарями классов
-        
+
         ⚠️ **Это бета-версия!** Функционал находится в разработке.
-        """)
+        """
+        )
 
         if st.session_state.selected_folder_path:
             from src.dcmmetatest.normalizer import (
@@ -1384,7 +1495,8 @@ else:
     # Стартовая страница
     st.info("👈 Введите путь к датасету в боковой панели и нажмите 'Запустить анализ'")
 
-    st.markdown("""
+    st.markdown(
+        """
     ### Возможности приложения:
 
     - **📊 Статистика**: Общее количество исследований, файлов, пациентов
@@ -1400,10 +1512,12 @@ else:
     - DICOM Segmentation Objects
     - DICOM Structured Reports
     - JSON аннотации в форматах COCO, DICOM-SR
-    """)
+    """
+    )
 
     # Пример структуры
-    st.markdown("""
+    st.markdown(
+        """
     ### Ожидаемая структура датасета:
 
     ```
@@ -1419,7 +1533,8 @@ else:
     └── patient_002/
         └── ...
     ```
-    """)
+    """
+    )
 
 # Футер
 st.divider()
