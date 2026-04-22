@@ -29,6 +29,12 @@ from .io import (
     save_report_json,
     save_report_txt,
 )
+from .split import (
+    SplitConfig,
+    SplitStats,
+    split_dataset,
+)
+
 from .models import (
     AnalysisReport,
     StudyResult,
@@ -48,6 +54,8 @@ __version__ = "1.0.0"
 __all__ = [
     "StudyResult",
     "WorkerConfig",
+    "SplitConfig",
+    "SplitStats",
     "AnalysisReport",
     "configure_logging",
     "read_dicom_header",
@@ -75,6 +83,7 @@ __all__ = [
     "create_parser",
     "interactive_setup",
     "main",
+    "split_dataset",
     "is_dicom_file",
     "is_label_json",
 ]

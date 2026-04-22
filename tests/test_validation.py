@@ -1,10 +1,5 @@
 """Тесты модуля валидации датасета."""
 
-import sys
-from pathlib import Path
-
-sys.path.insert(0, str(Path(__file__).parent.parent / "src"))
-
 from dcmmetatest.validation import _find_duplicate_values, scan_dataset_anomalies
 
 
