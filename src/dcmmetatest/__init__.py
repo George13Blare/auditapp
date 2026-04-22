@@ -29,16 +29,15 @@ from .io import (
     save_report_json,
     save_report_txt,
 )
-from .split import (
-    SplitConfig,
-    SplitStats,
-    split_dataset,
-)
-
 from .models import (
     AnalysisReport,
     StudyResult,
     WorkerConfig,
+)
+from .split import (
+    SplitConfig,
+    SplitStats,
+    split_dataset,
 )
 from .utils import (
     check_dicom_anonymization,

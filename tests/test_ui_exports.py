@@ -2,7 +2,6 @@
 
 import pytest
 
-
 pytest.importorskip("streamlit")
 
 from dcmmetatest import ui
