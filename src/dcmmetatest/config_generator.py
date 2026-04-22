@@ -441,10 +441,12 @@ def generate_nnunet_config(dataset_info: DatasetInfo, output_path: Path, config:
     if images_dir.exists():
         for img_file in images_dir.glob("*.nii.gz"):
             case_id = img_file.stem.replace("_0000", "").replace("_0001", "")
-            dataset_json["training"].append({
-                "image": f"./imagesTr/{img_file.name}",
-                "label": f"./labelsTr/{case_id}.nii.gz",
-            })
+            dataset_json["training"].append(
+                {
+                    "image": f"./imagesTr/{img_file.name}",
+                    "label": f"./labelsTr/{case_id}.nii.gz",
+                }
+            )
 
     # Сохранение
     output_path = Path(output_path)
@@ -550,7 +552,7 @@ def generate_huggingface_config(
 def _generate_hf_dataset_script(config: HuggingFaceConfig, dataset_info: DatasetInfo) -> str:
     """Генерирует Python скрипт для загрузки датасета."""
 
-    script = f'''\"\"\"
+    script = f"""\"\"\"
 Датасет: {config.dataset_name}
 Описание: {config.description}
 Версия: {config.version}
@@ -666,7 +668,7 @@ class {config.dataset_name.replace("-", "_").title()}(datasets.GeneratorBasedBui
                 "study_id": study_id,
                 "modality": "{dataset_info.modality}",
             }}
-'''
+"""
 
     return script
 
@@ -674,7 +676,7 @@ class {config.dataset_name.replace("-", "_").title()}(datasets.GeneratorBasedBui
 def _generate_hf_readme(config: HuggingFaceConfig, dataset_info: DatasetInfo) -> str:
     """Генерирует README для Hugging Face."""
 
-    readme = f'''---
+    readme = f"""---
 license: {config.license}
 tags:
   - medical
@@ -724,7 +726,7 @@ dataset = load_dataset("{config.authors[0] if config.authors else 'username'}/{c
 ## Контакты
 
 {", ".join(config.authors)}
-'''
+"""
 
     return readme
 
