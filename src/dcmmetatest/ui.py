@@ -60,28 +60,6 @@ def run_preprocessing_pipeline(
     }
 
 
-def run_preprocessing_pipeline(
-    input_series_dir: str,
-    output_dir: str,
-    config: PreprocessingPipelineConfig,
-) -> dict[str, Any]:
-    """
-    Запускает preprocessing pipeline для одной серии.
-    """
-    input_path = Path(input_series_dir)
-    output_path = Path(output_dir)
-    output_path.mkdir(parents=True, exist_ok=True)
-
-    stats = preprocess_dicom_series_pipeline(input_path, output_path, config)
-    return {
-        "input_series_dir": str(input_path.resolve()),
-        "output_dir": str(output_path.resolve()),
-        "export_format": config.export_format,
-        "files_saved": stats.get("files_saved", 0),
-        "errors": stats.get("errors", []),
-    }
-
-
 def convert_report_to_dataframe(report: AnalysisReport) -> pd.DataFrame:
     """
     Преобразует отчёт анализа в DataFrame для отображения в таблице.
