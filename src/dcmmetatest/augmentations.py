@@ -233,7 +233,7 @@ def apply_gaussian_noise(
     noise = rng.normal(mean, std, size=volume.shape)
     noisy = volume + noise
 
-    return noisy.astype(volume.dtype)
+    return noisy.astype(volume.dtype)  # type: ignore[no-any-return]
 
 
 def apply_salt_pepper_noise(
