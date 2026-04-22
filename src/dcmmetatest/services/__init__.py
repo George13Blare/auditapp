@@ -24,9 +24,37 @@ from .intake import (
     validate_dataset_path,
 )
 from .manifest import ReportManifestArtifact, ReportManifestConfig, build_report_manifest
+from .pipeline import (
+    ClassMappingArtifact,
+    DatasetTaskType,
+    LabelDictionaryArtifact,
+    PipelineConfig,
+    PipelineMode,
+    PipelineResult,
+    PipelineStage,
+    StageConfig,
+    load_class_mapping,
+    load_label_dictionary,
+    run_pipeline,
+    save_class_mapping,
+    save_label_dictionary,
+)
 from .split import SplitArtifact, SplitRequest, run_split
 
 __all__ = [
+    "save_label_dictionary",
+    "save_class_mapping",
+    "run_pipeline",
+    "load_label_dictionary",
+    "load_class_mapping",
+    "StageConfig",
+    "PipelineStage",
+    "PipelineResult",
+    "PipelineMode",
+    "PipelineConfig",
+    "LabelDictionaryArtifact",
+    "DatasetTaskType",
+    "ClassMappingArtifact",
     "AnalysisRequest",
     "DatasetPathArtifact",
     "DatasetPathConfig",
