@@ -9,11 +9,37 @@ Streamlit приложение для визуального анализа DICO
     python -m streamlit run app.py
 """
 
+import json
 import logging
 from pathlib import Path
 
 import streamlit as st
 
+from src.dcmmetatest.image_processor import AugmentationConfig, PreprocessingPipelineConfig
+from src.dcmmetatest.normalizer import NormalizationConfig, SplitConfig
+from src.dcmmetatest.services import (
+    AnalysisRequest,
+    DatasetPathConfig,
+    DatasetPreprocessRequest,
+    DatasetScanConfig,
+    FileOperationRequest,
+    NormalizeRequest,
+    PreprocessSeriesRequest,
+    ReportManifestConfig,
+    SplitRequest,
+    build_report_manifest,
+    delete_fs_item,
+    rename_fs_item,
+    run_analysis,
+    run_dataset_preprocessing,
+    run_normalize,
+    run_preprocess_series,
+    run_segmentation_analysis,
+    run_split,
+    scan_dataset_structure,
+    validate_dataset_path,
+)
+from src.dcmmetatest.ui import (
 from dcmmetatest.image_processor import (
     PreprocessingPipelineConfig,
     preprocess_dataset_pipeline,
@@ -147,89 +173,6 @@ run_preprocess_button = st.sidebar.button(
 )
 
 
-# Функция для сканирования структуры датасета
-def scan_dataset_structure(path: str, max_depth: int = 3) -> dict:
-    """Сканирует структуру датасета и возвращает её в виде дерева."""
-
-    def scan_dir(dir_path: Path, current_depth: int) -> dict | None:
-        if current_depth > max_depth:
-            return None
-
-        try:
-            items = sorted(dir_path.iterdir(), key=lambda x: (x.is_file(), x.name.lower()))
-        except PermissionError:
-            return {"name": dir_path.name, "type": "dir", "error": "Нет доступа", "children": []}
-
-        children = []
-        for item in items[:50]:  # Ограничиваем количество элементов для производительности
-            if item.is_dir():
-                child = scan_dir(item, current_depth + 1)
-                if child:
-                    children.append(child)
-            else:
-                children.append(
-                    {
-                        "name": item.name,
-                        "type": "file",
-                        "size": item.stat().st_size,
-                    }
-                )
-
-        return {
-            "name": dir_path.name,
-            "type": "dir",
-            "path": str(dir_path),
-            "children": children,
-            "total_items": len(items),
-        }
-
-    root_path = Path(path)
-    if not root_path.exists():
-        return None
-
-    return scan_dir(root_path, 0)
-
-
-# Функция для удаления файла/папки
-def delete_item(item_path: str) -> tuple[bool, str]:
-    """Удаляет файл или пустую папку."""
-    path = Path(item_path)
-    if not path.exists():
-        return False, "Файл/папка не существует"
-
-    try:
-        if path.is_file():
-            path.unlink()
-            return True, f"Файл удалён: {item_path}"
-        elif path.is_dir():
-            if any(path.iterdir()):
-                return False, "Папка не пуста. Удалите сначала содержимое."
-            path.rmdir()
-            return True, f"Папка удалена: {item_path}"
-    except Exception as e:
-        return False, f"Ошибка удаления: {e!s}"
-
-    return False, "Неизвестная ошибка"
-
-
-# Функция для переименования файла/папки
-def rename_item(old_path: str, new_name: str) -> tuple[bool, str]:
-    """Переименовывает файл или папку."""
-    old = Path(old_path)
-    if not old.exists():
-        return False, "Файл/папка не существует"
-
-    new = old.parent / new_name
-    if new.exists():
-        return False, "Файл/папка с таким именем уже существует"
-
-    try:
-        old.rename(new)
-        return True, f"Переименовано в: {new_name}"
-    except Exception as e:
-        return False, f"Ошибка переименования: {e!s}"
-
-
 # Зона прогресс бара (отдельная выделенная область)
 progress_container = st.container()
 
@@ -253,7 +196,13 @@ if run_preprocess_button:
                 augmentation=AugmentationConfig(flip_horizontal=True, add_gaussian_noise=preprocess_augment),
                 export_format=preprocess_format,
             )
-            preprocess_stats = run_preprocessing_pipeline(str(preprocess_path), str(export_path), preprocessing_config)
+            preprocess_stats = run_preprocess_series(
+                PreprocessSeriesRequest(
+                    input_series_dir=str(preprocess_path),
+                    output_dir=str(export_path),
+                    config=preprocessing_config,
+                )
+            )
 
         if preprocess_stats["errors"]:
             st.error(f"❌ Preprocessing завершился с ошибкой: {preprocess_stats['errors'][0]}")
@@ -266,7 +215,9 @@ if run_preprocess_button:
 # Основная область
 if analyze_button:
     # Валидация пути
-    is_valid, path_or_error = validate_folder_path(folder_path)
+    intake_artifact = validate_dataset_path(DatasetPathConfig(raw_path=folder_path))
+
+    is_valid, path_or_error = intake_artifact.is_valid, intake_artifact.resolved_path or intake_artifact.message
 
     if not is_valid:
         st.error(f"❌ Ошибка: {path_or_error}")
@@ -313,7 +264,7 @@ if analyze_button:
 
             def run_analysis_thread():
                 try:
-                    result = cached_run_analysis(valid_path, config_dict)
+                    result = run_analysis(AnalysisRequest(dataset_path=valid_path, config_dict=config_dict))
                     analysis_result["report"] = result
                 except Exception as e:
                     analysis_error["error"] = e
@@ -539,47 +490,20 @@ if analyze_button:
 
         with col_exp2:
             if st.button("📝 JSON", use_container_width=True):
-                # Простая сериализация
-                import json
-                from dataclasses import asdict
-
-                report_dict = asdict(report)
-                json_str = json.dumps(report_dict, indent=2, ensure_ascii=False, default=str)
+                manifest = build_report_manifest(report, metrics, ReportManifestConfig())
                 st.download_button(
                     label="Скачать JSON",
-                    data=json_str,
+                    data=manifest.json_payload,
                     file_name="dicom_analysis_report.json",
                     mime="application/json",
                 )
 
         with col_exp3:
             if st.button("📋 TXT", use_container_width=True):
-                # Форматированный текстовый отчёт
-                lines = [
-                    "=" * 60,
-                    "DICOM ANALYSIS REPORT",
-                    "=" * 60,
-                    f"Total Studies: {metrics['total_studies']}",
-                    f"Total Files: {metrics['total_files']}",
-                    f"Unique Patients: {metrics['unique_patients']}",
-                    f"Labeled: {metrics['labeled_percent']}%",
-                    f"Non-Anonymized: {metrics['non_anon_percent']}%",
-                    "",
-                    "Modality Stats:",
-                ]
-                for mod, count in report.modality_stats.items():
-                    lines.append(f"  {mod}: {count}")
-
-                if report.errors:
-                    lines.append("")
-                    lines.append(f"Errors ({len(report.errors)}):")
-                    for err in report.errors[:10]:
-                        lines.append(f"  - {err}")
-
-                txt_content = "\n".join(lines)
+                manifest = build_report_manifest(report, metrics, ReportManifestConfig())
                 st.download_button(
                     label="Скачать TXT",
-                    data=txt_content,
+                    data=manifest.text_payload,
                     file_name="dicom_analysis_report.txt",
                     mime="text/plain",
                 )
@@ -601,13 +525,17 @@ if analyze_button:
         if st.session_state.selected_folder_path:
             # Кнопка обновления структуры
             if st.button("🔄 Обновить структуру", key="refresh_structure"):
-                st.session_state.dataset_structure = scan_dataset_structure(st.session_state.selected_folder_path)
+                st.session_state.dataset_structure = scan_dataset_structure(
+                    DatasetScanConfig(root_path=st.session_state.selected_folder_path)
+                ).root
                 st.rerun()
 
             # Сканирование структуры если ещё не сделано
             if st.session_state.dataset_structure is None:
                 with st.spinner("Сканирование структуры..."):
-                    st.session_state.dataset_structure = scan_dataset_structure(st.session_state.selected_folder_path)
+                    st.session_state.dataset_structure = scan_dataset_structure(
+                        DatasetScanConfig(root_path=st.session_state.selected_folder_path)
+                    ).root
 
             if st.session_state.dataset_structure:
                 # Функция для рекурсивного отображения дерева
@@ -638,7 +566,10 @@ if analyze_button:
                             )
                             if st.button("✏️", key=f"btn_rename_{node_key}", help="Переименовать"):
                                 if new_name and new_name != node["name"]:
-                                    success, msg = rename_item(node.get("path", ""), new_name)
+                                    rename_result = rename_fs_item(
+                                        FileOperationRequest(item_path=node.get("path", ""), new_name=new_name)
+                                    )
+                                    success, msg = rename_result.success, rename_result.message
                                     if success:
                                         st.success(msg)
                                         st.session_state.dataset_structure = None  # Сброс кэша
@@ -648,7 +579,8 @@ if analyze_button:
 
                             # Удаление (только пустые папки)
                             if st.button("🗑️", key=f"btn_delete_{node_key}", help="Удалить пустую папку"):
-                                success, msg = delete_item(node.get("path", ""))
+                                delete_result = delete_fs_item(FileOperationRequest(item_path=node.get("path", "")))
+                                success, msg = delete_result.success, delete_result.message
                                 if success:
                                     st.success(msg)
                                     st.session_state.dataset_structure = None  # Сброс кэша
@@ -692,7 +624,10 @@ if analyze_button:
                                 if new_name and new_name != node["name"]:
                                     # Для файлов нужен путь
                                     file_path = str(Path(st.session_state.selected_folder_path) / node_key)
-                                    success, msg = rename_item(file_path, new_name)
+                                    rename_result = rename_fs_item(
+                                        FileOperationRequest(item_path=file_path, new_name=new_name)
+                                    )
+                                    success, msg = rename_result.success, rename_result.message
                                     if success:
                                         st.success(msg)
                                         st.session_state.dataset_structure = None  # Сброс кэша
@@ -703,7 +638,8 @@ if analyze_button:
                             # Удаление файла
                             if st.button("🗑️", key=f"btn_delete_{node_key}", help="Удалить файл"):
                                 file_path = str(Path(st.session_state.selected_folder_path) / node_key)
-                                success, msg = delete_item(file_path)
+                                delete_result = delete_fs_item(FileOperationRequest(item_path=file_path))
+                                success, msg = delete_result.success, delete_result.message
                                 if success:
                                     st.success(msg)
                                     st.session_state.dataset_structure = None  # Сброс кэша
@@ -910,8 +846,8 @@ if analyze_button:
                         # Сканирование текущей структуры
                         with st.spinner("🔍 Проверка структуры..."):
                             actual_structure = scan_dataset_structure(
-                                st.session_state.selected_folder_path, max_depth=5
-                            )
+                                DatasetScanConfig(root_path=st.session_state.selected_folder_path, max_depth=5)
+                            ).root
 
                             if actual_structure:
                                 matches, deviations = validate_structure_against_template(actual_structure, template)
@@ -1260,10 +1196,12 @@ if analyze_button:
 
                         try:
                             with st.spinner("Нормализация..."):
-                                stats = normalize_dataset(
-                                    st.session_state.selected_folder_path,
-                                    output_norm_dir,
-                                    config,
+                                stats = run_normalize(
+                                    NormalizeRequest(
+                                        source_dir=st.session_state.selected_folder_path,
+                                        output_dir=output_norm_dir,
+                                        config=config,
+                                    )
                                 )
 
                             st.success("✅ Нормализация завершена!")
@@ -1333,10 +1271,12 @@ if analyze_button:
 
                         try:
                             with st.spinner("Разделение датасета..."):
-                                stats = split_dataset(
-                                    st.session_state.selected_folder_path,
-                                    output_split_dir,
-                                    config,
+                                stats = run_split(
+                                    SplitRequest(
+                                        source_dir=st.session_state.selected_folder_path,
+                                        output_dir=output_split_dir,
+                                        config=config,
+                                    )
                                 )
 
                             st.success("✅ Разделение завершено!")
@@ -1363,7 +1303,7 @@ if analyze_button:
                 if st.button("🔍 Сканировать маски сегментации"):
                     try:
                         with st.spinner("Анализ..."):
-                            seg_info = analyze_segmentation_masks(st.session_state.selected_folder_path)
+                            seg_info = run_segmentation_analysis(st.session_state.selected_folder_path)
 
                         if seg_info["total_masks"] > 0:
                             st.success(f"Найдено масок: {seg_info['total_masks']}")
@@ -1548,11 +1488,13 @@ if analyze_button:
                                 export_format=preprocess_export_format,
                             )
                             max_series = int(max_series_to_process) if int(max_series_to_process) > 0 else None
-                            pp_summary = preprocess_dataset_pipeline(
-                                input_root=Path(st.session_state.selected_folder_path),
-                                output_root=Path(output_dataset_preprocess_dir),
-                                config=pp_config,
-                                max_series=max_series,
+                            pp_summary = run_dataset_preprocessing(
+                                DatasetPreprocessRequest(
+                                    input_root=st.session_state.selected_folder_path,
+                                    output_root=output_dataset_preprocess_dir,
+                                    config=pp_config,
+                                    max_series=max_series,
+                                )
                             )
 
                         col_r1, col_r2, col_r3, col_r4 = st.columns(4)
