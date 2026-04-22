@@ -14,7 +14,23 @@ from pathlib import Path
 
 import streamlit as st
 
+from src.dcmmetatest.image_processor import (
+    AugmentationConfig as BatchAugmentationConfig,
+)
+from src.dcmmetatest.image_processor import (
+    PreprocessingPipelineConfig,
+    preprocess_dataset_pipeline,
+)
+from src.dcmmetatest.normalizer import (
+    NormalizationConfig,
+    SplitConfig,
+    analyze_segmentation_masks,
+    normalize_dataset,
+    split_dataset,
+)
 from src.dcmmetatest.ui import (
+    AugmentationConfig,
+    PreprocessPipelineConfig,
     cached_run_analysis,
     convert_report_to_dataframe,
     create_age_distribution_chart,
@@ -22,8 +38,10 @@ from src.dcmmetatest.ui import (
     create_modality_pie_chart,
     create_quality_metrics_cards,
     create_study_date_timeline,
+    run_preprocessing_pipeline,
     validate_folder_path,
 )
+from src.dcmmetatest.validation import scan_dataset_anomalies
 
 # Настройка страницы
 st.set_page_config(
@@ -39,9 +57,11 @@ logger = logging.getLogger(__name__)
 
 # Заголовок
 st.title("🏥 DICOM Dataset Analyzer")
-st.markdown("""
+st.markdown(
+    """
 Интерактивный инструмент для анализа DICOM-датасетов, проверки разметки и качества данных.
-""")
+"""
+)
 
 # Инициализация session state
 if "analysis_in_progress" not in st.session_state:
@@ -58,6 +78,10 @@ if "analysis_history" not in st.session_state:
     st.session_state.analysis_history = []  # История анализов
 if "structure_templates" not in st.session_state:
     st.session_state.structure_templates = {}  # Шаблоны структуры
+if "schema_builder_levels" not in st.session_state:
+    st.session_state.schema_builder_levels = ["patient_level", "study_level", "series_level"]
+if "schema_builder_file_patterns" not in st.session_state:
+    st.session_state.schema_builder_file_patterns = "*.dcm"
 if "current_report" not in st.session_state:
     st.session_state.current_report = None  # Текущий отчёт для доступа из других вкладок
 
@@ -104,6 +128,28 @@ modality_filter = st.sidebar.multiselect(
 
 # Кнопка запуска анализа
 analyze_button = st.sidebar.button("🚀 Запустить анализ", type="primary", disabled=not folder_path)
+
+st.sidebar.divider()
+st.sidebar.subheader("🧪 Preprocessing pipeline")
+preprocess_input_path = st.sidebar.text_input(
+    "Путь к DICOM серии",
+    value=folder_path,
+    help="Папка с DICOM-срезами одной серии",
+)
+preprocess_output_path = st.sidebar.text_input(
+    "Папка экспорта",
+    value="",
+    help="Куда сохранить обработанные данные",
+)
+preprocess_format = st.sidebar.selectbox("Формат экспорта", ["png", "jpg", "tiff", "nifti"], index=0)
+preprocess_normalization = st.sidebar.selectbox("Нормализация", ["minmax", "zscore", "sigmoid"], index=0)
+preprocess_resample = st.sidebar.checkbox("Ресемплинг до 1x1x1 мм", value=False)
+preprocess_crop = st.sidebar.checkbox("Air/ROI кроппинг", value=False)
+preprocess_augment = st.sidebar.checkbox("Аугментация (flip + noise)", value=False)
+run_preprocess_button = st.sidebar.button(
+    "⚙️ Запустить preprocessing",
+    disabled=not preprocess_input_path or not preprocess_output_path,
+)
 
 
 # Функция для сканирования структуры датасета
@@ -192,6 +238,35 @@ def rename_item(old_path: str, new_name: str) -> tuple[bool, str]:
 # Зона прогресс бара (отдельная выделенная область)
 progress_container = st.container()
 
+# Preprocessing pipeline block
+if run_preprocess_button:
+    preprocess_path = Path(preprocess_input_path)
+    export_path = Path(preprocess_output_path)
+
+    if not preprocess_path.exists() or not preprocess_path.is_dir():
+        st.error(f"❌ Некорректный путь к серии: {preprocess_path}")
+    else:
+        with st.spinner("Выполняется preprocessing pipeline..."):
+            preprocessing_config = PreprocessPipelineConfig(
+                normalization_method=preprocess_normalization,
+                target_spacing=(1.0, 1.0, 1.0) if preprocess_resample else None,
+                apply_air_crop=preprocess_crop,
+                air_crop_threshold=0.0,
+                air_crop_margin=1,
+                apply_augmentation=preprocess_augment,
+                augmentation=AugmentationConfig(flip_horizontal=True, add_gaussian_noise=preprocess_augment),
+                export_format=preprocess_format,
+            )
+            preprocess_stats = run_preprocessing_pipeline(str(preprocess_path), str(export_path), preprocessing_config)
+
+        if preprocess_stats["errors"]:
+            st.error(f"❌ Preprocessing завершился с ошибкой: {preprocess_stats['errors'][0]}")
+        else:
+            st.success(
+                f"✅ Preprocessing завершён. Сохранено файлов: {preprocess_stats['files_saved']} "
+                f"(формат: {preprocess_stats['export_format']})"
+            )
+
 # Основная область
 if analyze_button:
     # Валидация пути
@@ -277,7 +352,7 @@ if analyze_button:
                 "timestamp": datetime.datetime.now().isoformat(),
                 "path": valid_path,
                 "total_studies": len(report.results),
-                "total_files": sum(len(s.files) for s in report.results),
+                "total_files": sum(s.file_count for s in report.results),
                 "non_anon_count": len(report.non_anon_patients),
                 "config": config_dict.copy(),
             }
@@ -406,12 +481,49 @@ if analyze_button:
                 for folder in report.empty_folders:
                     st.text(folder)
 
+        st.divider()
+        st.markdown("### 🧪 Бета: углублённый поиск аномалий")
+        st.caption("Проверяет битые DICOM, пустые SEG-маски и дубликаты SOPInstanceUID.")
+
+        if st.button("🔍 Запустить сканер аномалий", key="scan_anomalies_btn"):
+            with st.spinner("Сканирование аномалий..."):
+                anomalies = scan_dataset_anomalies(st.session_state.selected_folder_path, max_files=10000)
+
+            if anomalies["errors"]:
+                st.error(f"Ошибки сканера: {'; '.join(anomalies['errors'])}")
+            else:
+                col_a1, col_a2, col_a3, col_a4 = st.columns(4)
+                with col_a1:
+                    st.metric("Проверено файлов", anomalies["scanned_files"])
+                with col_a2:
+                    st.metric("Битые файлы", len(anomalies["broken_files"]))
+                with col_a3:
+                    st.metric("Пустые SEG", len(anomalies["empty_seg_masks"]))
+                with col_a4:
+                    st.metric("Дубликаты SOP UID", len(anomalies["duplicate_sop_instance_uid"]))
+
+                if anomalies["broken_files"]:
+                    with st.expander("Показать битые файлы"):
+                        for p in anomalies["broken_files"][:100]:
+                            st.text(p)
+
+                if anomalies["empty_seg_masks"]:
+                    with st.expander("Показать пустые SEG-маски"):
+                        for p in anomalies["empty_seg_masks"][:100]:
+                            st.text(p)
+
+                if anomalies["duplicate_sop_instance_uid"]:
+                    with st.expander("Показать дубликаты SOPInstanceUID"):
+                        st.json(anomalies["duplicate_sop_instance_uid"])
+
     with tab4:
         st.subheader("Экспорт отчёта")
 
-        st.markdown("""
+        st.markdown(
+            """
         Выберите формат для экспорта результатов анализа.
-        """)
+        """
+        )
 
         col_exp1, col_exp2, col_exp3 = st.columns(3)
 
@@ -479,14 +591,16 @@ if analyze_button:
     # Вкладка редактора структуры датасета
     with tab5:
         st.subheader("🗂️ Редактор структуры датасета")
-        st.markdown("""
+        st.markdown(
+            """
         Инструмент для просмотра и редактирования структуры вашего DICOM-датасета.
 
         **Возможности:**
         - Просмотр древовидной структуры
         - Переименование файлов и папок
         - Удаление пустых папок и файлов
-        """)
+        """
+        )
 
         if st.session_state.selected_folder_path:
             # Кнопка обновления структуры
@@ -611,7 +725,8 @@ if analyze_button:
     # Вкладка конфигуратора структуры (редактор шаблонов)
     with tab6:
         st.subheader("⚙️ Конфигуратор структуры датасета")
-        st.markdown("""
+        st.markdown(
+            """
         Инструмент для создания и управления шаблонами ожидаемой структуры DICOM-датасета.
 
         **Возможности:**
@@ -619,7 +734,8 @@ if analyze_button:
         - Валидация реального датасета по шаблону
         - Сохранение и загрузка шаблонов в JSON
         - Автоматическое выявление отклонений от шаблона
-        """)
+        """
+        )
 
         col_tmpl1, col_tmpl2 = st.columns([2, 1])
 
@@ -637,10 +753,65 @@ if analyze_button:
             # Создание нового шаблона
             st.markdown("### ➕ Создать новый шаблон")
             new_template_name = st.text_input("Название шаблона", placeholder="например: CT_Chest_Standard")
+            schema_mode = st.radio(
+                "Режим создания схемы",
+                ["🧱 Конструктор", "🧾 JSON вручную"],
+                horizontal=True,
+                key="schema_mode",
+            )
 
-            template_structure = st.text_area(
-                "Структура шаблона (JSON формат)",
-                value="""{
+            def build_template_from_constructor(level_names: list[str], file_patterns: list[str]) -> dict:
+                nested: dict | list[str] = file_patterns
+                for level_name in reversed(level_names):
+                    nested = {level_name: nested}
+                return {"root": nested}
+
+            if schema_mode == "🧱 Конструктор":
+                st.markdown("#### Конструктор схемы")
+                st.caption("Добавьте уровни структуры и шаблоны файлов без ручного редактирования JSON.")
+
+                cols_builder = st.columns([1, 1, 2])
+                with cols_builder[0]:
+                    if st.button("➕ Уровень", key="builder_add_level"):
+                        st.session_state.schema_builder_levels.append(
+                            f"level_{len(st.session_state.schema_builder_levels) + 1}"
+                        )
+                with cols_builder[1]:
+                    if st.button("➖ Уровень", key="builder_remove_level"):
+                        if len(st.session_state.schema_builder_levels) > 1:
+                            st.session_state.schema_builder_levels.pop()
+
+                for idx, default_level_name in enumerate(st.session_state.schema_builder_levels):
+                    st.session_state.schema_builder_levels[idx] = st.text_input(
+                        f"Уровень {idx + 1}",
+                        value=default_level_name,
+                        key=f"builder_level_{idx}",
+                        help="Например: patient, study, series",
+                    )
+
+                patterns_raw = st.text_input(
+                    "Шаблоны файлов (через запятую)",
+                    value=st.session_state.schema_builder_file_patterns,
+                    key="builder_file_patterns",
+                    help="Например: *.dcm, *.nii.gz",
+                )
+                st.session_state.schema_builder_file_patterns = patterns_raw
+                file_patterns = [p.strip() for p in patterns_raw.split(",") if p.strip()]
+                if not file_patterns:
+                    file_patterns = ["*.dcm"]
+
+                generated_template = build_template_from_constructor(
+                    st.session_state.schema_builder_levels,
+                    file_patterns,
+                )
+                import json
+
+                template_structure = json.dumps(generated_template, indent=2, ensure_ascii=False)
+                st.code(template_structure, language="json")
+            else:
+                template_structure = st.text_area(
+                    "Структура шаблона (JSON формат)",
+                    value="""{
   "root": {
     "patient_level": {
       "study_level": {
@@ -649,9 +820,9 @@ if analyze_button:
     }
   }
 }""",
-                height=200,
-                help="Опишите ожидаемую структуру в формате JSON",
-            )
+                    height=200,
+                    help="Опишите ожидаемую структуру в формате JSON",
+                )
 
             if st.button("💾 Сохранить шаблон"):
                 if new_template_name and template_structure:
@@ -804,7 +975,8 @@ if analyze_button:
     # Вкладка анонимизатора DICOM
     with tab7:
         st.subheader("🔐 Анонимизатор DICOM-данных")
-        st.markdown("""
+        st.markdown(
+            """
         Инструмент для безопасной анонимизации DICOM-файлов с сохранением целостности исследований.
 
         **Возможности:**
@@ -816,7 +988,8 @@ if analyze_button:
         **Уровни анонимизации:**
         - **Basic**: Базовая анонимизация по стандарту DICOM PS3.15
         - **Full**: Полная анонимизация всех идентифицирующих полей
-        """)
+        """
+        )
 
         if st.session_state.selected_folder_path:
             from src.dcmmetatest.anonymizer import AnonymizationConfig, run_anonymization
@@ -904,7 +1077,8 @@ if analyze_button:
     # Вкладка истории анализов
     with tab8:
         st.subheader("📜 История анализов")
-        st.markdown("""
+        st.markdown(
+            """
         Журнал всех выполненных анализов датасетов в текущей сессии.
 
         **Информация в истории:**
@@ -913,7 +1087,8 @@ if analyze_button:
         - Количество исследований и файлов
         - Количество неанонимизированных пациентов
         - Использованная конфигурация
-        """)
+        """
+        )
 
         if st.session_state.analysis_history:
             # Отображение истории в виде таблицы
@@ -985,7 +1160,8 @@ if analyze_button:
     # Вкладка бета-функционала: нормализация и сплит
     with tab9:
         st.subheader("🧪 Бета: Нормализация и разделение датасетов")
-        st.markdown("""
+        st.markdown(
+            """
         Экспериментальный раздел для нормализации структуры DICOM-датасетов и разделения на train/val/test.
 
         **Возможности:**
@@ -993,23 +1169,22 @@ if analyze_button:
         - 🔀 Разделение на train/val/test с настройкой пропорций
         - 🏷️ Извлечение информации о масках сегментации
         - 📖 Работа со словарями классов
-        
+
         ⚠️ **Это бета-версия!** Функционал находится в разработке.
-        """)
+        """
+        )
 
         if st.session_state.selected_folder_path:
-            from src.dcmmetatest.normalizer import (
-                NormalizationConfig,
-                SplitConfig,
-                analyze_segmentation_masks,
-                normalize_dataset,
-                split_dataset,
-            )
-
             # Переключатель между режимами
             beta_mode = st.radio(
                 "Режим работы",
-                ["Нормализация", "Разделение (Split)", "Анализ сегментаций", "Словарь классов"],
+                [
+                    "Нормализация",
+                    "Разделение (Split)",
+                    "Анализ сегментаций",
+                    "Словарь классов",
+                    "Препроцессинг датасета",
+                ],
                 horizontal=True,
             )
 
@@ -1323,6 +1498,82 @@ if analyze_button:
                             mime="application/json",
                         )
 
+            # Режим пакетного препроцессинга
+            elif beta_mode == "Препроцессинг датасета":
+                st.markdown("### ⚙️ Препроцессинг всего датасета")
+                st.caption("Применяет preprocessing pipeline ко всем найденным DICOM-сериям.")
+
+                col_pp1, col_pp2 = st.columns(2)
+                with col_pp1:
+                    output_dataset_preprocess_dir = st.text_input(
+                        "Выходная директория",
+                        placeholder="/path/to/preprocessed/output",
+                        help="Структура серий будет сохранена относительно корня входного датасета",
+                    )
+                    preprocess_export_format = st.selectbox(
+                        "Формат экспорта",
+                        ["png", "jpg", "tiff", "nifti"],
+                        index=0,
+                    )
+                    preprocess_norm_method = st.selectbox(
+                        "Нормализация интенсивности",
+                        ["minmax", "zscore", "sigmoid"],
+                        index=0,
+                    )
+
+                with col_pp2:
+                    preprocess_resample = st.checkbox("Ресемплинг до 1x1x1 мм", value=False)
+                    preprocess_crop = st.checkbox("Кроппинг foreground", value=False)
+                    preprocess_augment = st.checkbox("Аугментация (flip+noise)", value=False)
+                    max_series_to_process = st.number_input(
+                        "Лимит серий (0 = без лимита)",
+                        min_value=0,
+                        value=0,
+                    )
+
+                if st.button("🚀 Запустить препроцессинг датасета", type="primary"):
+                    if not output_dataset_preprocess_dir:
+                        st.error("Укажите выходную директорию")
+                    else:
+                        with st.spinner("Препроцессинг датасета..."):
+                            pp_config = PreprocessingPipelineConfig(
+                                normalization_method=preprocess_norm_method,
+                                enable_resampling=preprocess_resample,
+                                target_spacing=(1.0, 1.0, 1.0),
+                                crop_nonzero=preprocess_crop,
+                                crop_threshold=0.0,
+                                crop_margin=1,
+                                enable_augmentation=preprocess_augment,
+                                augmentation=BatchAugmentationConfig(
+                                    flip_horizontal=True,
+                                    add_gaussian_noise=preprocess_augment,
+                                    random_seed=42,
+                                ),
+                                export_format=preprocess_export_format,
+                            )
+                            max_series = int(max_series_to_process) if int(max_series_to_process) > 0 else None
+                            pp_summary = preprocess_dataset_pipeline(
+                                input_root=Path(st.session_state.selected_folder_path),
+                                output_root=Path(output_dataset_preprocess_dir),
+                                config=pp_config,
+                                max_series=max_series,
+                            )
+
+                        col_r1, col_r2, col_r3, col_r4 = st.columns(4)
+                        with col_r1:
+                            st.metric("Найдено серий", pp_summary["total_series_found"])
+                        with col_r2:
+                            st.metric("Успешно", pp_summary["series_processed"])
+                        with col_r3:
+                            st.metric("С ошибками", pp_summary["series_failed"])
+                        with col_r4:
+                            st.metric("Сохранено файлов", pp_summary["total_files_saved"])
+
+                        if pp_summary["errors"]:
+                            with st.expander("Ошибки препроцессинга"):
+                                for err in pp_summary["errors"][:100]:
+                                    st.text(err)
+
         else:
             st.info("Сначала запустите анализ датасета")
 
@@ -1330,7 +1581,8 @@ else:
     # Стартовая страница
     st.info("👈 Введите путь к датасету в боковой панели и нажмите 'Запустить анализ'")
 
-    st.markdown("""
+    st.markdown(
+        """
     ### Возможности приложения:
 
     - **📊 Статистика**: Общее количество исследований, файлов, пациентов
@@ -1346,10 +1598,12 @@ else:
     - DICOM Segmentation Objects
     - DICOM Structured Reports
     - JSON аннотации в форматах COCO, DICOM-SR
-    """)
+    """
+    )
 
     # Пример структуры
-    st.markdown("""
+    st.markdown(
+        """
     ### Ожидаемая структура датасета:
 
     ```
@@ -1365,7 +1619,8 @@ else:
     └── patient_002/
         └── ...
     ```
-    """)
+    """
+    )
 
 # Футер
 st.divider()
