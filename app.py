@@ -14,19 +14,17 @@ from pathlib import Path
 
 import streamlit as st
 
-from src.dcmmetatest.image_processor import (
-    AugmentationConfig,
+from dcmmetatest.image_processor import (
     PreprocessingPipelineConfig,
     preprocess_dataset_pipeline,
 )
-from src.dcmmetatest.normalizer import (
+from dcmmetatest.normalizer import (
     NormalizationConfig,
-    SplitConfig,
     analyze_segmentation_masks,
     normalize_dataset,
-    split_dataset,
 )
-from src.dcmmetatest.ui import (
+from dcmmetatest.split import SplitConfig, split_dataset
+from dcmmetatest.ui import (
     AugmentationConfig,
     cached_run_analysis,
     convert_report_to_dataframe,
@@ -37,10 +35,8 @@ from src.dcmmetatest.ui import (
     create_study_date_timeline,
     run_preprocessing_pipeline,
     validate_folder_path,
-    AugmentationConfig,
-    PreprocessPipelineConfig,
 )
-from src.dcmmetatest.validation import scan_dataset_anomalies
+from dcmmetatest.validation import scan_dataset_anomalies
 
 # Настройка страницы
 st.set_page_config(
