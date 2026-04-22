@@ -30,7 +30,6 @@ from src.dcmmetatest.normalizer import (
 )
 from src.dcmmetatest.ui import (
     AugmentationConfig,
-    PreprocessPipelineConfig,
     cached_run_analysis,
     convert_report_to_dataframe,
     create_age_distribution_chart,
@@ -247,13 +246,14 @@ if run_preprocess_button:
         st.error(f"❌ Некорректный путь к серии: {preprocess_path}")
     else:
         with st.spinner("Выполняется preprocessing pipeline..."):
-            preprocessing_config = PreprocessPipelineConfig(
+            preprocessing_config = PreprocessingPipelineConfig(
                 normalization_method=preprocess_normalization,
                 target_spacing=(1.0, 1.0, 1.0) if preprocess_resample else None,
-                apply_air_crop=preprocess_crop,
-                air_crop_threshold=0.0,
-                air_crop_margin=1,
-                apply_augmentation=preprocess_augment,
+                enable_resampling=preprocess_resample,
+                crop_nonzero=preprocess_crop,
+                crop_threshold=0.0,
+                crop_margin=1,
+                enable_augmentation=preprocess_augment,
                 augmentation=AugmentationConfig(flip_horizontal=True, add_gaussian_noise=preprocess_augment),
                 export_format=preprocess_format,
             )
