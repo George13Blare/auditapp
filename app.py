@@ -14,9 +14,22 @@ from pathlib import Path
 
 import streamlit as st
 
+from src.dcmmetatest.image_processor import (
+    AugmentationConfig as BatchAugmentationConfig,
+)
+from src.dcmmetatest.image_processor import (
+    PreprocessingPipelineConfig,
+    preprocess_dataset_pipeline,
+)
+from src.dcmmetatest.normalizer import (
+    NormalizationConfig,
+    SplitConfig,
+    analyze_segmentation_masks,
+    normalize_dataset,
+    split_dataset,
+)
 from src.dcmmetatest.ui import (
     AugmentationConfig,
-    PreprocessPipelineConfig,
     cached_run_analysis,
     convert_report_to_dataframe,
     create_age_distribution_chart,
@@ -235,13 +248,14 @@ if run_preprocess_button:
         st.error(f"❌ Некорректный путь к серии: {preprocess_path}")
     else:
         with st.spinner("Выполняется preprocessing pipeline..."):
-            preprocessing_config = PreprocessPipelineConfig(
+            preprocessing_config = PreprocessingPipelineConfig(
                 normalization_method=preprocess_normalization,
                 target_spacing=(1.0, 1.0, 1.0) if preprocess_resample else None,
-                apply_air_crop=preprocess_crop,
-                air_crop_threshold=0.0,
-                air_crop_margin=1,
-                apply_augmentation=preprocess_augment,
+                enable_resampling=preprocess_resample,
+                crop_nonzero=preprocess_crop,
+                crop_threshold=0.0,
+                crop_margin=1,
+                enable_augmentation=preprocess_augment,
                 augmentation=AugmentationConfig(flip_horizontal=True, add_gaussian_noise=preprocess_augment),
                 export_format=preprocess_format,
             )
@@ -340,7 +354,7 @@ if analyze_button:
                 "timestamp": datetime.datetime.now().isoformat(),
                 "path": valid_path,
                 "total_studies": len(report.results),
-                "total_files": sum(len(s.files) for s in report.results),
+                "total_files": sum(s.file_count for s in report.results),
                 "non_anon_count": len(report.non_anon_patients),
                 "config": config_dict.copy(),
             }
@@ -1163,18 +1177,16 @@ if analyze_button:
         )
 
         if st.session_state.selected_folder_path:
-            from src.dcmmetatest.normalizer import (
-                NormalizationConfig,
-                SplitConfig,
-                analyze_segmentation_masks,
-                normalize_dataset,
-                split_dataset,
-            )
-
             # Переключатель между режимами
             beta_mode = st.radio(
                 "Режим работы",
-                ["Нормализация", "Разделение (Split)", "Анализ сегментаций", "Словарь классов"],
+                [
+                    "Нормализация",
+                    "Разделение (Split)",
+                    "Анализ сегментаций",
+                    "Словарь классов",
+                    "Препроцессинг датасета",
+                ],
                 horizontal=True,
             )
 
@@ -1487,6 +1499,82 @@ if analyze_button:
                             file_name="class_dictionary.json",
                             mime="application/json",
                         )
+
+            # Режим пакетного препроцессинга
+            elif beta_mode == "Препроцессинг датасета":
+                st.markdown("### ⚙️ Препроцессинг всего датасета")
+                st.caption("Применяет preprocessing pipeline ко всем найденным DICOM-сериям.")
+
+                col_pp1, col_pp2 = st.columns(2)
+                with col_pp1:
+                    output_dataset_preprocess_dir = st.text_input(
+                        "Выходная директория",
+                        placeholder="/path/to/preprocessed/output",
+                        help="Структура серий будет сохранена относительно корня входного датасета",
+                    )
+                    preprocess_export_format = st.selectbox(
+                        "Формат экспорта",
+                        ["png", "jpg", "tiff", "nifti"],
+                        index=0,
+                    )
+                    preprocess_norm_method = st.selectbox(
+                        "Нормализация интенсивности",
+                        ["minmax", "zscore", "sigmoid"],
+                        index=0,
+                    )
+
+                with col_pp2:
+                    preprocess_resample = st.checkbox("Ресемплинг до 1x1x1 мм", value=False)
+                    preprocess_crop = st.checkbox("Кроппинг foreground", value=False)
+                    preprocess_augment = st.checkbox("Аугментация (flip+noise)", value=False)
+                    max_series_to_process = st.number_input(
+                        "Лимит серий (0 = без лимита)",
+                        min_value=0,
+                        value=0,
+                    )
+
+                if st.button("🚀 Запустить препроцессинг датасета", type="primary"):
+                    if not output_dataset_preprocess_dir:
+                        st.error("Укажите выходную директорию")
+                    else:
+                        with st.spinner("Препроцессинг датасета..."):
+                            pp_config = PreprocessingPipelineConfig(
+                                normalization_method=preprocess_norm_method,
+                                enable_resampling=preprocess_resample,
+                                target_spacing=(1.0, 1.0, 1.0),
+                                crop_nonzero=preprocess_crop,
+                                crop_threshold=0.0,
+                                crop_margin=1,
+                                enable_augmentation=preprocess_augment,
+                                augmentation=BatchAugmentationConfig(
+                                    flip_horizontal=True,
+                                    add_gaussian_noise=preprocess_augment,
+                                    random_seed=42,
+                                ),
+                                export_format=preprocess_export_format,
+                            )
+                            max_series = int(max_series_to_process) if int(max_series_to_process) > 0 else None
+                            pp_summary = preprocess_dataset_pipeline(
+                                input_root=Path(st.session_state.selected_folder_path),
+                                output_root=Path(output_dataset_preprocess_dir),
+                                config=pp_config,
+                                max_series=max_series,
+                            )
+
+                        col_r1, col_r2, col_r3, col_r4 = st.columns(4)
+                        with col_r1:
+                            st.metric("Найдено серий", pp_summary["total_series_found"])
+                        with col_r2:
+                            st.metric("Успешно", pp_summary["series_processed"])
+                        with col_r3:
+                            st.metric("С ошибками", pp_summary["series_failed"])
+                        with col_r4:
+                            st.metric("Сохранено файлов", pp_summary["total_files_saved"])
+
+                        if pp_summary["errors"]:
+                            with st.expander("Ошибки препроцессинга"):
+                                for err in pp_summary["errors"][:100]:
+                                    st.text(err)
 
         else:
             st.info("Сначала запустите анализ датасета")

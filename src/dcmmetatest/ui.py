@@ -14,105 +14,33 @@ from streamlit.runtime.caching import cache_data
 
 from .analyzer import run_analysis
 from .image_processor import (
-    AugmentationConfig,
-    apply_augmentations,
-    convert_to_image_slices,
-    convert_to_nifti,
-    crop_to_nonzero,
-    normalize_intensity,
-    read_dicom_series,
-    resample_volume,
+    PreprocessingPipelineConfig,
+    preprocess_dicom_series_pipeline,
 )
 from .models import AnalysisReport, WorkerConfig
 
 logger = logging.getLogger(__name__)
 
 
-@dataclass
-class PreprocessPipelineConfig:
-    """Конфигурация единого preprocessing pipeline для DICOM серии."""
-
-    normalization_method: str = "minmax"
-    clip_percentile: tuple[float, float] | None = None
-    target_spacing: tuple[float, float, float] | None = None
-    apply_air_crop: bool = False
-    air_crop_threshold: float = -900.0
-    air_crop_margin: int = 0
-    apply_augmentation: bool = False
-    augmentation: AugmentationConfig = field(default_factory=AugmentationConfig)
-    export_format: str = "png"  # png, jpg, jpeg, tiff, nifti
-    export_prefix: str = "slice"
-    overlay_alpha: float = 0.5
-
-
 def run_preprocessing_pipeline(
     input_series_dir: str,
     output_dir: str,
-    config: PreprocessPipelineConfig,
+    config: PreprocessingPipelineConfig,
 ) -> dict[str, Any]:
     """
-    Запускает единый preprocessing pipeline:
-    read -> optional resample -> optional crop -> optional augment -> export.
+    Запускает preprocessing pipeline для одной серии.
     """
     input_path = Path(input_series_dir)
     output_path = Path(output_dir)
     output_path.mkdir(parents=True, exist_ok=True)
 
-    processed = read_dicom_series(input_path, apply_rescale=True, window_config=None)
-    volume = processed.array.astype("float32")
-    metadata = processed.metadata
-    applied_steps: list[str] = ["read_dicom_series"]
-    bbox = None
-
-    volume = normalize_intensity(volume, method=config.normalization_method, clip_percentile=config.clip_percentile)
-    applied_steps.append(f"normalize:{config.normalization_method}")
-
-    if config.target_spacing is not None:
-        current_spacing = (metadata.slice_thickness, metadata.pixel_spacing[0], metadata.pixel_spacing[1])
-        volume, _ = resample_volume(volume, current_spacing=current_spacing, target_spacing=config.target_spacing)
-        metadata.slice_thickness = config.target_spacing[0]
-        metadata.pixel_spacing = (config.target_spacing[1], config.target_spacing[2])
-        applied_steps.append("resample")
-
-    if config.apply_air_crop:
-        volume, bbox = crop_to_nonzero(
-            volume,
-            threshold=config.air_crop_threshold,
-            margin=config.air_crop_margin,
-        )
-        applied_steps.append("air_crop")
-
-    if config.apply_augmentation:
-        volume, _ = apply_augmentations(volume, config.augmentation)
-        applied_steps.append("augment")
-
-    fmt = config.export_format.lower()
-    if fmt in {"png", "jpg", "jpeg", "tiff"}:
-        saved_files = convert_to_image_slices(
-            volume=volume,
-            output_dir=output_path / "images",
-            prefix=config.export_prefix,
-            overlay_alpha=config.overlay_alpha,
-            image_format=fmt,
-        )
-        export_path = str((output_path / "images").resolve())
-        files_saved = len(saved_files)
-    elif fmt == "nifti":
-        nifti_path = convert_to_nifti(volume, metadata, output_path / "volume.nii.gz")
-        export_path = str(nifti_path.resolve())
-        files_saved = 1
-    else:
-        raise ValueError(f"Неподдерживаемый формат экспорта: {config.export_format}")
-
+    stats = preprocess_dicom_series_pipeline(input_path, output_path, config)
     return {
         "input_series_dir": str(input_path.resolve()),
         "output_dir": str(output_path.resolve()),
-        "export_format": fmt,
-        "export_path": export_path,
-        "files_saved": files_saved,
-        "volume_shape": tuple(int(v) for v in volume.shape),
-        "applied_steps": applied_steps,
-        "crop_bbox": tuple((s.start, s.stop) for s in bbox) if bbox is not None else None,
+        "export_format": config.export_format,
+        "files_saved": stats.get("files_saved", 0),
+        "errors": stats.get("errors", []),
     }
 
 

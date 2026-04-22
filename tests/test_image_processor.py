@@ -16,6 +16,8 @@ from dcmmetatest.image_processor import (
     convert_to_png,
     crop_to_nonzero,
     crop_to_roi,
+    discover_dicom_series_dirs,
+    preprocess_dataset_pipeline,
     preprocess_volume_pipeline,
     resample_volume,
 )
@@ -197,3 +199,31 @@ def test_preprocess_volume_pipeline_combines_steps():
     assert processed.shape[0] == 4  # по Z после ресемплинга x2
     assert processed_mask is not None
     assert processed_mask.shape == processed.shape
+
+
+def test_discover_dicom_series_dirs_finds_nested_series(tmp_path: Path):
+    series_a = tmp_path / "patient1" / "study1" / "series1"
+    series_b = tmp_path / "patient1" / "study1" / "series2"
+    series_a.mkdir(parents=True)
+    series_b.mkdir(parents=True)
+    (series_a / "image_001.dcm").write_bytes(b"test")
+    (series_b / "image_002.dicom").write_bytes(b"test")
+
+    found = discover_dicom_series_dirs(tmp_path)
+    found_set = {p.resolve() for p in found}
+
+    assert series_a.resolve() in found_set
+    assert series_b.resolve() in found_set
+
+
+def test_preprocess_dataset_pipeline_handles_empty_dataset(tmp_path: Path):
+    output = tmp_path / "out"
+    summary = preprocess_dataset_pipeline(
+        input_root=tmp_path,
+        output_root=output,
+        config=PreprocessingPipelineConfig(),
+    )
+
+    assert summary["total_series_found"] == 0
+    assert summary["series_processed"] == 0
+    assert summary["series_failed"] == 0

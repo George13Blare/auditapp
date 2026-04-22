@@ -459,6 +459,72 @@ def preprocess_dicom_series_pipeline(
     return stats
 
 
+def discover_dicom_series_dirs(root_path: Path) -> list[Path]:
+    """
+    Находит директории, содержащие DICOM-файлы.
+    """
+    root = Path(root_path)
+    if not root.exists() or not root.is_dir():
+        return []
+
+    dicom_dirs: set[Path] = set()
+    for pattern in ("*.dcm", "*.dicom", "*.DCM", "*.DICOM"):
+        for file_path in root.rglob(pattern):
+            dicom_dirs.add(file_path.parent)
+
+    return sorted(dicom_dirs)
+
+
+def preprocess_dataset_pipeline(
+    input_root: Path,
+    output_root: Path,
+    config: PreprocessingPipelineConfig,
+    max_series: int | None = None,
+) -> dict[str, Any]:
+    """
+    Пакетный preprocessing для всего датасета (по всем найденным сериям).
+    """
+    input_root = Path(input_root)
+    output_root = Path(output_root)
+    output_root.mkdir(parents=True, exist_ok=True)
+
+    series_dirs = discover_dicom_series_dirs(input_root)
+    if max_series is not None:
+        series_dirs = series_dirs[:max_series]
+
+    summary: dict[str, Any] = {
+        "total_series_found": len(series_dirs),
+        "series_processed": 0,
+        "series_failed": 0,
+        "total_files_saved": 0,
+        "errors": [],
+        "series_results": [],
+    }
+
+    for idx, series_dir in enumerate(series_dirs, start=1):
+        relative = series_dir.relative_to(input_root)
+        series_output_dir = output_root / relative
+        stats = preprocess_dicom_series_pipeline(series_dir, series_output_dir, config)
+
+        series_result = {
+            "index": idx,
+            "series_dir": str(series_dir),
+            "output_dir": str(series_output_dir),
+            "files_saved": stats.get("files_saved", 0),
+            "errors": stats.get("errors", []),
+        }
+        summary["series_results"].append(series_result)
+
+        if stats.get("errors"):
+            summary["series_failed"] += 1
+            summary["errors"].extend(stats["errors"])
+        else:
+            summary["series_processed"] += 1
+            summary["total_files_saved"] += int(stats.get("files_saved", 0))
+
+    return summary
+
+
 def read_dicom_series(
     series_path: Path, apply_rescale: bool = True, window_config: WindowConfig | None = None
 ) -> ProcessedImage:
