@@ -8,7 +8,7 @@ import logging
 from dataclasses import dataclass, field
 from enum import Enum
 from pathlib import Path
-from typing import Optional, cast
+from typing import Any, Optional, cast
 
 import numpy as np
 import numpy.typing as npt
@@ -415,11 +415,11 @@ def preprocess_dicom_series_pipeline(
     input_path: Path,
     output_path: Path,
     config: PreprocessingPipelineConfig,
-) -> dict:
+) -> dict[str, Any]:
     """
     Сквозной pipeline: чтение DICOM серии -> preprocessing -> экспорт.
     """
-    stats: dict[str, int | str | list] = {"files_saved": 0, "errors": [], "format": config.export_format}
+    stats: dict[str, Any] = {"files_saved": 0, "errors": [], "format": config.export_format}
     output_path = Path(output_path)
     output_path.mkdir(parents=True, exist_ok=True)
 
@@ -451,7 +451,7 @@ def preprocess_dicom_series_pipeline(
             stats["files_saved"] = len(files)
 
     except Exception as exc:
-        stats["errors"].append(str(exc))  # type: ignore[index]
+        stats["errors"].append(str(exc))
         logger.exception("Ошибка preprocess_dicom_series_pipeline")
 
     return stats
