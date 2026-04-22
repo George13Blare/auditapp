@@ -10,7 +10,7 @@ import logging
 from dataclasses import dataclass, field
 from enum import Enum
 from pathlib import Path
-from typing import Any, Optional, cast
+from typing import Any, cast
 
 import numpy as np
 import numpy.typing as npt
@@ -70,8 +70,8 @@ class ImageMetadata:
     image_orientation: tuple[float, ...] = ()
     rescale_intercept: float = 0.0
     rescale_slope: float = 1.0
-    window_center: Optional[float] = None
-    window_width: Optional[float] = None
+    window_center: float | None = None
+    window_width: float | None = None
     bits_allocated: int = 16
     photometric_interpretation: str = "MONOCHROME2"
 
@@ -82,8 +82,8 @@ class ProcessedImage:
 
     array: np.ndarray
     metadata: ImageMetadata
-    mask: Optional[np.ndarray] = None
-    mask_classes: Optional[list[dict]] = None
+    mask: np.ndarray | None = None
+    mask_classes: list[dict] | None = None
 
 
 @dataclass
@@ -95,7 +95,7 @@ class AugmentationConfig:
     flip_vertical: bool = False
     add_gaussian_noise: bool = False
     noise_std: float = 0.01
-    random_seed: Optional[int] = None
+    random_seed: int | None = None
 
 
 @dataclass
@@ -103,7 +103,7 @@ class PreprocessingPipelineConfig:
     """Конфигурация единого preprocessing pipeline."""
 
     normalization_method: str = "minmax"
-    clip_percentile: Optional[tuple[float, float]] = None
+    clip_percentile: tuple[float, float] | None = None
     enable_resampling: bool = False
     target_spacing: tuple[float, float, float] = (1.0, 1.0, 1.0)
     crop_nonzero: bool = False
@@ -143,7 +143,7 @@ def apply_windowing(
 
 
 def normalize_intensity(
-    array: np.ndarray, method: str = "minmax", clip_percentile: Optional[tuple[float, float]] = None
+    array: np.ndarray, method: str = "minmax", clip_percentile: tuple[float, float] | None = None
 ) -> np.ndarray:
     """
     Нормализует интенсивность изображения.
@@ -191,8 +191,8 @@ def normalize_intensity(
 def apply_augmentations(
     array: np.ndarray,
     config: AugmentationConfig,
-    mask: Optional[np.ndarray] = None,
-) -> tuple[np.ndarray, Optional[np.ndarray]]:
+    mask: np.ndarray | None = None,
+) -> tuple[np.ndarray, np.ndarray | None]:
     """
     Применяет базовые аугментации к объему или изображению.
 
@@ -290,8 +290,8 @@ def crop_to_nonzero(
 def crop_to_roi(
     array: np.ndarray,
     roi_slices: tuple[slice, ...],
-    mask: Optional[np.ndarray] = None,
-) -> tuple[np.ndarray, Optional[np.ndarray]]:
+    mask: np.ndarray | None = None,
+) -> tuple[np.ndarray, np.ndarray | None]:
     """
     Кроп по заданному ROI bbox.
 
@@ -388,8 +388,8 @@ def preprocess_volume_pipeline(
     volume: np.ndarray,
     spacing: tuple[float, float, float],
     config: PreprocessingPipelineConfig,
-    mask: Optional[np.ndarray] = None,
-) -> tuple[np.ndarray, Optional[np.ndarray], tuple[float, float, float]]:
+    mask: np.ndarray | None = None,
+) -> tuple[np.ndarray, np.ndarray | None, tuple[float, float, float]]:
     """
     Применяет единый preprocessing pipeline к уже загруженному объему.
     """
@@ -460,7 +460,7 @@ def preprocess_dicom_series_pipeline(
 
 
 def read_dicom_series(
-    series_path: Path, apply_rescale: bool = True, window_config: Optional[WindowConfig] = None
+    series_path: Path, apply_rescale: bool = True, window_config: WindowConfig | None = None
 ) -> ProcessedImage:
     """
     Читает серию DICOM файлов как 3D объем.
@@ -572,7 +572,7 @@ def read_dicom_series(
     return ProcessedImage(array=volume, metadata=metadata)
 
 
-def read_dicom_seg(seg_path: Path, reference_volume: Optional[np.ndarray] = None) -> tuple[np.ndarray, list[dict]]:
+def read_dicom_seg(seg_path: Path, reference_volume: np.ndarray | None = None) -> tuple[np.ndarray, list[dict]]:
     """
     Читает DICOM SEG файл и извлекает маску с классами.
 
@@ -632,7 +632,7 @@ def convert_to_image_slices(
     volume: np.ndarray,
     output_dir: Path,
     prefix: str = "slice",
-    mask: Optional[np.ndarray] = None,
+    mask: np.ndarray | None = None,
     overlay_alpha: float = 0.5,
     image_format: str = "png",
 ) -> list[Path]:
@@ -723,7 +723,7 @@ def convert_to_png(
     volume: np.ndarray,
     output_dir: Path,
     prefix: str = "slice",
-    mask: Optional[np.ndarray] = None,
+    mask: np.ndarray | None = None,
     overlay_alpha: float = 0.5,
 ) -> list[Path]:
     """
@@ -740,7 +740,7 @@ def convert_to_png(
 
 
 def convert_to_nifti(
-    volume: np.ndarray, metadata: ImageMetadata, output_path: Path, mask: Optional[np.ndarray] = None
+    volume: np.ndarray, metadata: ImageMetadata, output_path: Path, mask: np.ndarray | None = None
 ) -> Path:
     """
     Конвертирует объем в формат NIfTI.
@@ -799,7 +799,7 @@ def convert_to_nifti(
 def flatten_to_2d(
     input_path: Path,
     output_path: Path,
-    window_config: Optional[WindowConfig] = None,
+    window_config: WindowConfig | None = None,
     save_mask: bool = True,
     format: str = "png",
 ) -> dict:
