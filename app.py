@@ -15,9 +15,7 @@ from pathlib import Path
 import streamlit as st
 
 from src.dcmmetatest.image_processor import (
-    AugmentationConfig as BatchAugmentationConfig,
-)
-from src.dcmmetatest.image_processor import (
+    AugmentationConfig,
     PreprocessingPipelineConfig,
     preprocess_dataset_pipeline,
 )
@@ -1546,7 +1544,7 @@ if analyze_button:
                                 crop_threshold=0.0,
                                 crop_margin=1,
                                 enable_augmentation=preprocess_augment,
-                                augmentation=BatchAugmentationConfig(
+                                augmentation=AugmentationConfig(
                                     flip_horizontal=True,
                                     add_gaussian_noise=preprocess_augment,
                                     random_seed=42,
