@@ -251,8 +251,8 @@ def generate_yolo_config(dataset_info: DatasetInfo, output_path: Path, config: O
     """
     try:
         import yaml
-    except ImportError:
-        raise ImportError("Требуется PyYAML: pip install pyyaml")
+    except ImportError as e:
+        raise ImportError("Требуется PyYAML: pip install pyyaml") from e
 
     if config is None:
         config = YOLOConfig()
@@ -330,8 +330,24 @@ def generate_monai_config(dataset_info: DatasetInfo, output_path: Path, config: 
             {"_target_": "EnsureChannelFirstd", "keys": ["image", "label"]},
             {"_target_": "Orientationd", "keys": ["image", "label"], "axcodes": "RAS"},
             {"_target_": "Spacingd", "keys": ["image", "label"], "pixdim": [1.0, 1.0, 1.0]},
-            {"_target_": "ScaleIntensityRanged", "keys": ["image"], "a_min": config.intensity_range[0], "a_max": config.intensity_range[1], "b_min": 0.0, "b_max": 1.0, "clip": config.clip_outliers},
-            {"_target_": "RandCropByPosNegd", "keys": ["image", "label"], "label_key": "label", "spatial_size": [96, 96, 96], "pos": 1, "neg": 1, "num_samples": 4},
+            {
+                "_target_": "ScaleIntensityRanged",
+                "keys": ["image"],
+                "a_min": config.intensity_range[0],
+                "a_max": config.intensity_range[1],
+                "b_min": 0.0,
+                "b_max": 1.0,
+                "clip": config.clip_outliers,
+            },
+            {
+                "_target_": "RandCropByPosNegd",
+                "keys": ["image", "label"],
+                "label_key": "label",
+                "spatial_size": [96, 96, 96],
+                "pos": 1,
+                "neg": 1,
+                "num_samples": 4,
+            },
             {"_target_": "RandFlipd", "keys": ["image", "label"], "prob": 0.5, "spatial_axis": 0},
             {"_target_": "RandFlipd", "keys": ["image", "label"], "prob": 0.5, "spatial_axis": 1},
             {"_target_": "RandRotate90d", "keys": ["image", "label"], "prob": 0.5, "max_k": 3},
@@ -344,7 +360,15 @@ def generate_monai_config(dataset_info: DatasetInfo, output_path: Path, config: 
             {"_target_": "EnsureChannelFirstd", "keys": ["image", "label"]},
             {"_target_": "Orientationd", "keys": ["image", "label"], "axcodes": "RAS"},
             {"_target_": "Spacingd", "keys": ["image", "label"], "pixdim": [1.0, 1.0, 1.0]},
-            {"_target_": "ScaleIntensityRanged", "keys": ["image"], "a_min": config.intensity_range[0], "a_max": config.intensity_range[1], "b_min": 0.0, "b_max": 1.0, "clip": config.clip_outliers},
+            {
+                "_target_": "ScaleIntensityRanged",
+                "keys": ["image"],
+                "a_min": config.intensity_range[0],
+                "a_max": config.intensity_range[1],
+                "b_min": 0.0,
+                "b_max": 1.0,
+                "clip": config.clip_outliers,
+            },
             {"_target_": "ToTensord", "keys": ["image", "label"]},
         ]
 
@@ -413,7 +437,6 @@ def generate_nnunet_config(dataset_info: DatasetInfo, output_path: Path, config:
     # Добавление информации об обучении
     train_dir = Path(dataset_info.train_path)
     images_dir = train_dir.parent / "imagesTr" if train_dir.exists() else train_dir
-    labels_dir = train_dir.parent / "labelsTr" if train_dir.exists() else train_dir
 
     if images_dir.exists():
         for img_file in images_dir.glob("*.nii.gz"):
@@ -442,7 +465,9 @@ def generate_nnunet_config(dataset_info: DatasetInfo, output_path: Path, config:
     return output_path
 
 
-def generate_huggingface_config(dataset_info: DatasetInfo, output_path: Path, config: Optional[HuggingFaceConfig] = None) -> Path:
+def generate_huggingface_config(
+    dataset_info: DatasetInfo, output_path: Path, config: Optional[HuggingFaceConfig] = None
+) -> Path:
     """
     Генерирует конфиг для Hugging Face Datasets.
 
@@ -614,25 +639,25 @@ class {config.dataset_name.replace("-", "_").title()}(datasets.GeneratorBasedBui
     def _generate_examples(self, filepath):
         \"\"\"Генерация примеров из директории.\"\"\"
         path = Path(filepath)
-        
+
         # Маппинг имен классов в ID
         class_to_id = {{name: idx for idx, name in enumerate({dataset_info.class_names})}}
-        
+
         for idx, img_file in enumerate(path.glob("*.png")):
             # Извлечение метаданных из имени файла
             parts = img_file.stem.split("_")
             patient_id = parts[0] if len(parts) > 0 else ""
             study_id = parts[1] if len(parts) > 1 else ""
-            
+
             # Поиск соответствующей маски
             mask_file = path / f"{{img_file.stem}}_mask.png"
             label_id = 0
             label_name = "background"
-            
+
             if mask_file.exists():
                 # Здесь можно добавить логику определения класса из маски
                 pass
-            
+
             yield idx, {{
                 "image": str(img_file),
                 "label": label_id,

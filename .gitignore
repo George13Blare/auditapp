@@ -1,13 +1,18 @@
-```
+```gitignore
 # Python
 __pycache__/
 *.pyc
 *.pyo
 *.pyd
 
-# Logs and temp files
+# Testing
+.pytest_cache/
+.coverage
+coverage/
+htmlcov/
+
+# Logs
 *.log
-*.tmp
 
 # Environment
 .env
@@ -17,23 +22,11 @@ __pycache__/
 # Editors
 .vscode/
 .idea/
+*.swp
+*.swo
 
 # Dependencies
 .venv/
 venv/
-node_modules/
-
-# Build artifacts
-dist/
-build/
-target/
-
-# Coverage
-.coverage
-coverage/
-htmlcov/
-
-# Cache
 .mypy_cache/
-.pytest_cache/
 ```

@@ -14,10 +14,9 @@ import logging
 from dataclasses import dataclass, field
 from enum import Enum
 from pathlib import Path
-from typing import Literal, Optional, Union
+from typing import Optional
 
 import numpy as np
-import numpy.typing as npt
 
 logger = logging.getLogger(__name__)
 
