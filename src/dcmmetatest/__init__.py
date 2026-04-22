@@ -41,6 +41,10 @@ from .registry import (
     RegistryManifestV1,
     build_summary_report,
     export_manifest,
+from .split import (
+    SplitConfig,
+    SplitStats,
+    split_dataset,
 )
 from .utils import (
     check_dicom_anonymization,
@@ -56,6 +60,8 @@ __version__ = "1.0.0"
 __all__ = [
     "StudyResult",
     "WorkerConfig",
+    "SplitConfig",
+    "SplitStats",
     "AnalysisReport",
     "configure_logging",
     "read_dicom_header",
@@ -83,6 +89,7 @@ __all__ = [
     "create_parser",
     "interactive_setup",
     "main",
+    "split_dataset",
     "is_dicom_file",
     "is_label_json",
     "MANIFEST_VERSION",
