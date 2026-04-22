@@ -27,6 +27,7 @@ from src.dcmmetatest.normalizer import (
     split_dataset,
 )
 from src.dcmmetatest.ui import (
+    AugmentationConfig,
     cached_run_analysis,
     convert_report_to_dataframe,
     create_age_distribution_chart,
@@ -36,6 +37,8 @@ from src.dcmmetatest.ui import (
     create_study_date_timeline,
     run_preprocessing_pipeline,
     validate_folder_path,
+    AugmentationConfig,
+    PreprocessPipelineConfig,
 )
 from src.dcmmetatest.validation import scan_dataset_anomalies
 
