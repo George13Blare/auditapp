@@ -49,6 +49,7 @@ from dcmmetatest.normalizer import (
     analyze_segmentation_masks,
     normalize_dataset,
 )
+from src.dcmmetatest.ui import (
 from dcmmetatest.split import SplitConfig, split_dataset
 from dcmmetatest.ui import (
     AugmentationConfig,
