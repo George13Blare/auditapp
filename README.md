@@ -170,6 +170,54 @@ python -m src.dcmmetatest.cli /path/to/dataset --config config.yaml
 
 ---
 
+## Registry Builder v1 (канонический manifest)
+
+Для задач реестра данных доступен отдельный режим `registry builder v1`: intake сырых файлов → канонический `manifest`.
+
+### Зафиксированные сущности v1
+
+- `patient`
+- `study`
+- `series`
+- `instance`
+- `annotation`
+- `split_assignment`
+- `preprocessing_artifact`
+
+### Schema v1 и versioning
+
+- `manifest_version`: версия контракта манифеста (для v1 = `1.0`)
+- `schema_revision`: ревизия внутри версии схемы (для v1 = `1`)
+
+Правила:
+1. Ломающие изменения структуры повышают `manifest_version`.
+2. Обратно-совместимые доработки внутри v1 повышают `schema_revision`.
+3. Экспортеры/валидаторы должны проверять оба поля до чтения сущностей.
+
+### Пример конфига для builder
+
+```yaml
+# examples/registry_builder_v1.yaml
+exclude_patterns:
+  - "**/tmp/*"
+  - "**/*.bak"
+registry_format: json
+```
+
+### Пример запуска builder
+
+```bash
+python -m src.dcmmetatest.cli /path/to/dataset \
+  --build-registry \
+  --registry-format json \
+  --registry-output manifest_v1.json \
+  --summary-output manifest_summary.json
+```
+
+Поддерживаемые форматы экспорта manifest: `json`, `csv`, `parquet` (для parquet нужен `pyarrow`).
+
+---
+
 ## Структура проекта
 
 ```

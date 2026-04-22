@@ -1,0 +1,4 @@
+exclude_patterns:
+  - "**/tmp/*"
+  - "**/*.bak"
+registry_format: json

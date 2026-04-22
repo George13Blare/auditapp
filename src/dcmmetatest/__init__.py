@@ -34,6 +34,14 @@ from .models import (
     StudyResult,
     WorkerConfig,
 )
+from .registry import (
+    MANIFEST_VERSION,
+    SCHEMA_REVISION,
+    RegistryBuilderV1,
+    RegistryManifestV1,
+    build_summary_report,
+    export_manifest,
+)
 from .utils import (
     check_dicom_anonymization,
     configure_logging,
@@ -77,4 +85,10 @@ __all__ = [
     "main",
     "is_dicom_file",
     "is_label_json",
+    "MANIFEST_VERSION",
+    "SCHEMA_REVISION",
+    "RegistryManifestV1",
+    "RegistryBuilderV1",
+    "export_manifest",
+    "build_summary_report",
 ]

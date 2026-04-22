@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import argparse
+import json
 import logging
 import sys
 from pathlib import Path
@@ -10,6 +11,7 @@ from pathlib import Path
 from .analyzer import print_summary, run_analysis
 from .io import load_config_file, save_report_csv, save_report_json, save_report_txt
 from .models import WorkerConfig
+from .registry import RegistryBuilderV1, build_summary_report, export_manifest
 from .utils import (
     configure_logging,
     prompt_choice,
@@ -148,6 +150,25 @@ def create_parser() -> argparse.ArgumentParser:
         "--interactive",
         action="store_true",
         help="Интерактивный режим настройки",
+    )
+    parser.add_argument(
+        "--build-registry",
+        action="store_true",
+        help="Построить канонический registry manifest (schema v1) вместо отчёта анализа",
+    )
+    parser.add_argument(
+        "--registry-output",
+        help="Путь для сохранения manifest (если не указан, используется --output)",
+    )
+    parser.add_argument(
+        "--registry-format",
+        default="json",
+        choices=["json", "csv", "parquet"],
+        help="Формат экспорта manifest",
+    )
+    parser.add_argument(
+        "--summary-output",
+        help="Путь для сохранения summary report по manifest в JSON",
     )
 
     return parser
@@ -345,6 +366,41 @@ def main(argv: list[str] | None = None) -> int:
     if not Path(args.input_path).exists():
         logger.error("Директория не найдена: %s", args.input_path)
         return 1
+
+    if args.build_registry:
+        try:
+            builder = RegistryBuilderV1(args.input_path, exclude_patterns=config.exclude_patterns)
+            manifest = builder.build()
+            summary = build_summary_report(manifest)
+        except Exception as e:
+            logger.error("Ошибка построения registry manifest: %s", e)
+            return 1
+
+        registry_output = args.registry_output or args.output
+        if not registry_output:
+            logger.error("Укажите --registry-output или --output для сохранения manifest")
+            return 1
+
+        try:
+            export_manifest(manifest, registry_output, args.registry_format)
+            logger.info("Manifest сохранён: %s", registry_output)
+            if args.summary_output:
+                Path(args.summary_output).write_text(
+                    json.dumps(summary, indent=2, ensure_ascii=False),
+                    encoding="utf-8",
+                )
+                logger.info("Summary сохранён: %s", args.summary_output)
+        except Exception as e:
+            logger.error("Ошибка экспорта manifest: %s", e)
+            return 1
+
+        print("Registry manifest v1 построен успешно")
+        print(
+            f"patients={summary['volumes']['patients']}, "
+            f"studies={summary['volumes']['studies']}, "
+            f"instances={summary['volumes']['instances']}"
+        )
+        return 0
 
     # Запуск анализа
     try:
