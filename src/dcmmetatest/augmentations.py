@@ -197,10 +197,11 @@ def apply_elastic_deformation(
             np.arange(shape[1]),
             indexing="ij",
         )
-        indices = (
+        indices_2d: tuple[np.ndarray, np.ndarray] = (
             coordinates[0] + dx,
             coordinates[1] + dy,
         )
+        indices = indices_2d  # type: ignore[assignment]
 
     # Применение деформации
     deformed = ndimage.map_coordinates(volume, indices, order=order, mode="nearest")
