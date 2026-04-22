@@ -193,7 +193,7 @@ def apply_elastic_deformation(
             coordinates[2] + dz,
         )
         deformed = ndimage.map_coordinates(volume, indices_3d, order=order, mode="nearest")
-    else:  # 2D
+    elif volume.ndim == 2:
         coordinates = np.meshgrid(
             np.arange(shape[0]),
             np.arange(shape[1]),
@@ -204,6 +204,8 @@ def apply_elastic_deformation(
             coordinates[1] + dy,
         )
         deformed = ndimage.map_coordinates(volume, indices_2d, order=order, mode="nearest")
+    else:
+        raise ValueError(f"Unsupported dimensionality: {volume.ndim}")
 
     return deformed.astype(volume.dtype)  # type: ignore[no-any-return]
 
