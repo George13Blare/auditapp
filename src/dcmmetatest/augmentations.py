@@ -122,7 +122,7 @@ def apply_rotation(
     else:
         raise ValueError(f"Ожидается 2D или 3D массив, получено {volume.ndim}D")
 
-    return rotated.astype(volume.dtype)
+    return rotated.astype(volume.dtype)  # type: ignore[no-any-return]
 
 
 def apply_flip(
@@ -186,7 +186,7 @@ def apply_elastic_deformation(
             np.arange(shape[2]),
             indexing="ij",
         )
-        indices = (
+        indices: tuple[np.ndarray, np.ndarray, np.ndarray] | tuple[np.ndarray, np.ndarray] = (
             coordinates[0] + dx,
             coordinates[1] + dy,
             coordinates[2] + dz,
@@ -205,7 +205,7 @@ def apply_elastic_deformation(
     # Применение деформации
     deformed = ndimage.map_coordinates(volume, indices, order=order, mode="nearest")
 
-    return deformed.astype(volume.dtype)
+    return deformed.astype(volume.dtype)  # type: ignore[no-any-return]
 
 
 def apply_gaussian_noise(
@@ -318,7 +318,7 @@ def apply_zoom(
         cropped[slices] = zoomed[cropped_slices]
         return cropped
 
-    return zoomed.astype(volume.dtype)
+    return zoomed.astype(volume.dtype)  # type: ignore[no-any-return]
 
 
 def apply_shift(
@@ -349,7 +349,7 @@ def apply_shift(
 
     shifted = ndimage.shift(volume, shift=shift_pixels, order=order, mode="nearest")
 
-    return shifted.astype(volume.dtype)
+    return shifted.astype(volume.dtype)  # type: ignore[no-any-return]
 
 
 def apply_brightness_contrast(
@@ -384,7 +384,7 @@ def apply_brightness_contrast(
     mean_val = result.mean()
     result = mean_val + (result - mean_val) * contrast_factor
 
-    return result.astype(volume.dtype)
+    return result.astype(volume.dtype)  # type: ignore[no-any-return]
 
 
 def apply_augmentation(
@@ -569,7 +569,7 @@ def generate_augmented_dataset(
 
     # Поиск изображений
     image_extensions = [".png", ".jpg", ".jpeg", ".tiff", ".tif"]
-    image_files = []
+    image_files: list[Path] = []
     for ext in image_extensions:
         image_files.extend(input_path.glob(f"*{ext}"))
         image_files.extend(input_path.glob(f"**/*{ext}"))

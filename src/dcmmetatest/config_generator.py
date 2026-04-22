@@ -432,7 +432,7 @@ def generate_nnunet_config(dataset_info: DatasetInfo, output_path: Path, config:
 
     # Добавление классов
     for idx, class_name in enumerate(dataset_info.class_names, start=1):
-        dataset_json["labels"][class_name] = idx
+        dataset_json["labels"][class_name] = idx  # type: ignore[index]
 
     # Добавление информации об обучении
     train_dir = Path(dataset_info.train_path)
@@ -441,7 +441,7 @@ def generate_nnunet_config(dataset_info: DatasetInfo, output_path: Path, config:
     if images_dir.exists():
         for img_file in images_dir.glob("*.nii.gz"):
             case_id = img_file.stem.replace("_0000", "").replace("_0001", "")
-            dataset_json["training"].append(
+            dataset_json["training"].append(  # type: ignore[attr-defined]
                 {
                     "image": f"./imagesTr/{img_file.name}",
                     "label": f"./labelsTr/{case_id}.nii.gz",
