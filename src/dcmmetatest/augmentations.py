@@ -178,6 +178,7 @@ def apply_elastic_deformation(
     dx = ndimage.gaussian_filter(rng.normal(size=shape), sigma, mode="constant", cval=0) * alpha
     dy = ndimage.gaussian_filter(rng.normal(size=shape), sigma, mode="constant", cval=0) * alpha
 
+    # Применение деформации в зависимости от размерности
     if volume.ndim == 3:
         dz = ndimage.gaussian_filter(rng.normal(size=shape), sigma, mode="constant", cval=0) * alpha
         coordinates = np.meshgrid(
@@ -186,24 +187,23 @@ def apply_elastic_deformation(
             np.arange(shape[2]),
             indexing="ij",
         )
-        indices: tuple[np.ndarray, ...] = (
+        indices_3d: tuple[np.ndarray, np.ndarray, np.ndarray] = (
             coordinates[0] + dx,
             coordinates[1] + dy,
             coordinates[2] + dz,
         )
+        deformed = ndimage.map_coordinates(volume, indices_3d, order=order, mode="nearest")
     else:  # 2D
         coordinates = np.meshgrid(
             np.arange(shape[0]),
             np.arange(shape[1]),
             indexing="ij",
         )
-        indices = (
+        indices_2d: tuple[np.ndarray, np.ndarray] = (
             coordinates[0] + dx,
             coordinates[1] + dy,
         )
-
-    # Применение деформации
-    deformed = ndimage.map_coordinates(volume, indices, order=order, mode="nearest")
+        deformed = ndimage.map_coordinates(volume, indices_2d, order=order, mode="nearest")
 
     return deformed.astype(volume.dtype)  # type: ignore[no-any-return]
 
