@@ -216,9 +216,7 @@ def apply_augmentations(
     # Для 2D приводим к псевдо-3D [1, H, W], чтобы использовать единый код
     array_work = array[np.newaxis, ...] if array.ndim == 2 else array.copy()
     mask_work = (
-        mask[np.newaxis, ...]
-        if mask is not None and mask.ndim == 2
-        else (mask.copy() if mask is not None else None)
+        mask[np.newaxis, ...] if mask is not None and mask.ndim == 2 else (mask.copy() if mask is not None else None)
     )
 
     rotate_k = config.rotate_k % 4
