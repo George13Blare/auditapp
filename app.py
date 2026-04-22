@@ -22,7 +22,10 @@ from src.dcmmetatest.ui import (
     create_modality_pie_chart,
     create_quality_metrics_cards,
     create_study_date_timeline,
+    run_preprocessing_pipeline,
     validate_folder_path,
+    AugmentationConfig,
+    PreprocessPipelineConfig,
 )
 
 # Настройка страницы
@@ -104,6 +107,28 @@ modality_filter = st.sidebar.multiselect(
 
 # Кнопка запуска анализа
 analyze_button = st.sidebar.button("🚀 Запустить анализ", type="primary", disabled=not folder_path)
+
+st.sidebar.divider()
+st.sidebar.subheader("🧪 Preprocessing pipeline")
+preprocess_input_path = st.sidebar.text_input(
+    "Путь к DICOM серии",
+    value=folder_path,
+    help="Папка с DICOM-срезами одной серии",
+)
+preprocess_output_path = st.sidebar.text_input(
+    "Папка экспорта",
+    value="",
+    help="Куда сохранить обработанные данные",
+)
+preprocess_format = st.sidebar.selectbox("Формат экспорта", ["png", "jpg", "tiff", "nifti"], index=0)
+preprocess_normalization = st.sidebar.selectbox("Нормализация", ["minmax", "zscore", "sigmoid"], index=0)
+preprocess_resample = st.sidebar.checkbox("Ресемплинг до 1x1x1 мм", value=False)
+preprocess_crop = st.sidebar.checkbox("Air/ROI кроппинг", value=False)
+preprocess_augment = st.sidebar.checkbox("Аугментация (flip + noise)", value=False)
+run_preprocess_button = st.sidebar.button(
+    "⚙️ Запустить preprocessing",
+    disabled=not preprocess_input_path or not preprocess_output_path,
+)
 
 
 # Функция для сканирования структуры датасета
@@ -191,6 +216,35 @@ def rename_item(old_path: str, new_name: str) -> tuple[bool, str]:
 
 # Зона прогресс бара (отдельная выделенная область)
 progress_container = st.container()
+
+# Preprocessing pipeline block
+if run_preprocess_button:
+    preprocess_path = Path(preprocess_input_path)
+    export_path = Path(preprocess_output_path)
+
+    if not preprocess_path.exists() or not preprocess_path.is_dir():
+        st.error(f"❌ Некорректный путь к серии: {preprocess_path}")
+    else:
+        with st.spinner("Выполняется preprocessing pipeline..."):
+            preprocessing_config = PreprocessPipelineConfig(
+                normalization_method=preprocess_normalization,
+                target_spacing=(1.0, 1.0, 1.0) if preprocess_resample else None,
+                apply_air_crop=preprocess_crop,
+                air_crop_threshold=0.0,
+                air_crop_margin=1,
+                apply_augmentation=preprocess_augment,
+                augmentation=AugmentationConfig(flip_horizontal=True, add_gaussian_noise=preprocess_augment),
+                export_format=preprocess_format,
+            )
+            preprocess_stats = run_preprocessing_pipeline(str(preprocess_path), str(export_path), preprocessing_config)
+
+        if preprocess_stats["errors"]:
+            st.error(f"❌ Preprocessing завершился с ошибкой: {preprocess_stats['errors'][0]}")
+        else:
+            st.success(
+                f"✅ Preprocessing завершён. Сохранено файлов: {preprocess_stats['files_saved']} "
+                f"(формат: {preprocess_stats['export_format']})"
+            )
 
 # Основная область
 if analyze_button:
