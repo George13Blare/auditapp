@@ -41,11 +41,15 @@ dev = [
 ]
 
 [project.scripts]
-dcmmetatest-plus = "src.dcmmetatest.cli:main"
+dcmmetatest-plus = "dcmmetatest.cli:main"
+dcmmetatest-ui = "dcmmetatest.ui_entrypoint:main"
+
+[tool.setuptools]
+package-dir = {"" = "src"}
 
 [tool.setuptools.packages.find]
-where = ["."]
-include = ["src*"]
+where = ["src"]
+include = ["dcmmetatest*"]
 
 [tool.black]
 line-length = 120
